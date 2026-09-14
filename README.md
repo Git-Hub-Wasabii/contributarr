@@ -82,13 +82,36 @@ Clearing ownership changes only the administrator claim. It preserves users, map
 
 The single Gunicorn worker reconciles every `SYNC_INTERVAL_MINUTES` (60 by default) and in response to the Seerr webhook. The in-process scheduler and lock are suitable for this one-worker deployment; do not add workers without moving scheduling and locking to an external service.
 
-Each request is isolated so one bad item does not stop the remainder. Movies check both Radarr instances by TMDB ID. TV requests resolve TVDB identity and sum only requested Sonarr seasons. The stored charge is always:
+Each request is isolated so one bad item does not stop the remainder. Accounting remains byte-exact internally; decimal GB conversion happens only when a value is displayed.
+
+Movie observation uses the sum of the 1080p and 4K copies:
 
 ```text
-max(previous_charge, currently_observed_size)
+movie_observed_bytes = sum(size of each distinct physical file returned by both Radarr instances)
 ```
 
-Deleting only a media file or replacing it with a smaller encode never lowers its charge. When a previously tracked request disappears from a successfully retrieved complete Seerr request list, Contributarr verifies the matching Radarr/Sonarr size before changing quota. It moves the item to **Deleted requests** and refunds the previous charge only when Servarr also reports 0 bytes. If media is still present—or the integration check fails—the charge is retained for safety and reconciliation tries again later. The original immutable usage ledger remains available for audit. Storage uses decimal GB (`1 GB = 1,000,000,000 bytes`). A Tautulli outage produces a warning and never blocks quotas or reconciliation.
+Normally the two Radarr instances represent separate copies, so both sizes are charged. When both return the same normalized physical path, Contributarr counts the file once using the larger reported size. Source attribution records `Radarr 1080p`, `Radarr 4K`, or both.
+
+TV observation resolves the TVDB identity and uses:
+
+```text
+tv_observed_bytes = sum(Sonarr sizeOnDisk for each distinct requested Seerr season)
+```
+
+Unrequested seasons are excluded. If Seerr supplies no season list, the existing fallback remains: all Sonarr seasons reported for that series are counted.
+
+Logical assets—each Radarr copy or Sonarr season—are assigned deterministically to the earliest active Seerr request. Later duplicate or overlapping requests receive only assets not already assigned, preventing double-counting while preserving requester ownership. A removed request whose media remains present keeps its existing reservation so a charge does not silently jump to another user.
+
+For each assigned asset, the stored charge uses:
+
+```text
+asset_high_water = max(previous_asset_high_water, currently_observed_bytes)
+request_charge = sum(asset_high_water for uniquely assigned physical assets)
+```
+
+The database stores current `observed_bytes`, assigned per-asset high-water metadata, and bytes excluded as duplicate separately from the charged total. Deleting only a media file or replacing it with a smaller encode never lowers its active high-water charge. When a previously tracked request disappears from a successfully retrieved complete Seerr request list, Contributarr verifies the matching Radarr/Sonarr size before changing quota. It moves the item to **Deleted requests** and refunds the previous charge only when Servarr also reports 0 bytes. If media is still present—or the integration check fails—the charge is retained for safety and reconciliation tries again later. The original immutable usage ledger remains available for audit. Storage uses decimal GB (`1 GB = 1,000,000,000 bytes`). A Tautulli outage produces a warning and never blocks quotas or reconciliation.
+
+Radarr does not expose filesystem inode/device identity. Consequently, cross-instance physical deduplication can be certain only when both instances report the same normalized path. Hard links or differently mounted paths to the same underlying file cannot be identified reliably from the available API data.
 
 The Settings page saves all integration URLs and encrypted API keys in one submission. It also provides an application-wide display-currency selector; changing the code changes presentation only and does not convert saved contribution amounts.
 
