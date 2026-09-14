@@ -12,11 +12,11 @@ After the claim, other Plex users may sign in. Everyone can access the community
 
 ## Publish to GHCR
 
-The included workflow derives its lowercase GHCR namespace from the repository running it and builds Linux AMD64 and ARM64 release images. `latest` always means the latest official stable GitHub Release. For reproducible deployment, replace `latest` in Compose with a specific CalVer tag:
+The included workflow derives its lowercase GHCR namespace from the repository running it and builds Linux AMD64 and ARM64 release images. `latest` always means the latest official stable GitHub Release. For reproducible deployment, replace `latest` in Compose with a specific SemVer tag:
 
 ```text
 ghcr.io/git-hub-wasabii/contributarr:latest
-ghcr.io/git-hub-wasabii/contributarr:v26.09.14  # pinned example
+ghcr.io/git-hub-wasabii/contributarr:v1.0.0  # pinned example
 ```
 
 GitHub packages may initially be private. Open the package on GitHub, choose **Package settings**, then change its visibility to **Public** so Docker hosts can pull without registry credentials.
@@ -174,22 +174,29 @@ Normal updates preserve `contributarr-data` and do not require cloning, `git pul
 
 ## Releases
 
-Release versions use `vYY.MM.DD`; append `.1`, `.2`, and so on for additional releases on the same day. The Git tag is the only release-version source. Main-branch pushes run all tests and Docker validation but do not update `latest` or create a GitHub Release.
+Release versions use SemVer 2.0.0 tags such as `v1.0.0`, `v1.1.0`, `v1.1.1`, and `v2.0.0`. Prereleases use tags such as `v1.0.0-beta.1`. Numeric components and numeric prerelease identifiers must not contain leading zeroes. The Git tag is the only release-version source; no version is maintained separately in source or documentation. Main-branch pushes run all tests and Docker validation but do not update `latest` or create a GitHub Release.
 
 Maintainer release process:
 
 1. Merge tested changes into `main` and confirm its validation run succeeds.
-2. Choose a new CalVer tag and create the GitHub Release once:
+2. Choose a new SemVer tag and create the GitHub Release once:
 
    ```bash
-   VERSION=v26.09.14
+   VERSION=v1.0.0
    gh release create "$VERSION" --target main --generate-notes --title "$VERSION"
    ```
 
 3. GitHub Actions validates that tagged source again.
-4. On success, the same multi-platform manifest is published as both the exact tag and `latest`.
+4. On success, a stable release is published as both the exact tag and `latest`. A prerelease is published only under its exact tag and never changes `latest`.
 
-The workflow rejects malformed dates and refuses to overwrite an existing GHCR version tag. Release tags are immutable: never move or recreate one; use a new same-day suffix for a correction. Prerelease-style tags are intentionally rejected so they cannot move `latest`. Repository rules should also protect the `v*` tag namespace from updates and deletion.
+The workflow rejects malformed SemVer tags and refuses to overwrite an existing GHCR version tag. Release tags are immutable: never move or recreate one; publish a new patch version for a correction. For example, correct `v1.1.0` with `v1.1.1`. Prereleases are supported but cannot move `latest`. Repository rules should also protect the `v*` tag namespace from updates and deletion.
+
+To deliberately publish a prerelease, mark the GitHub Release accordingly:
+
+```bash
+VERSION=v1.1.0-beta.1
+gh release create "$VERSION" --target main --prerelease --generate-notes --title "$VERSION"
+```
 
 No `edge` image is published. Contributarr's standard deployment channel is deliberately limited to stable releases.
 
