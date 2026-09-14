@@ -5,7 +5,8 @@ from pathlib import Path
 
 class Config:
     APP_NAME = "Contributarr"
-    APP_VERSION = "v26.09.14"
+    APP_VERSION = "dev"
+    BUILD_COMMIT = ""
     TZ = "Asia/Kuala_Lumpur"
     PORT = 9096
     DB_PATH = "/data/contributarr.db"
@@ -39,6 +40,8 @@ class Config:
         """Read environment overrides at application creation time."""
         mapping = {
             "APP_NAME": "APP_NAME",
+            "APP_VERSION": "APP_VERSION",
+            "BUILD_COMMIT": "BUILD_COMMIT",
             "TZ": "TZ",
             "PORT": "PORT",
             "DB_PATH": "DB_PATH",
