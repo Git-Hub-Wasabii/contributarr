@@ -293,17 +293,16 @@ def test_health_is_public_and_minimal(client):
     assert set(response.get_json()) == {"status", "application"}
 
 
-def test_ghcr_workflow_uses_wasabii_namespace_everywhere():
+def test_ghcr_workflow_is_repository_aware_and_gated():
     workflow = open(".github/workflows/publish-ghcr.yml", encoding="utf-8").read()
-    expected_image = "ghcr.io/git-hub-wasabii/contributarr"
-    assert f"IMAGE_NAME: {expected_image}" in workflow
+    assert "IMAGE_NAME: ghcr.io/${{ github.repository }}" in workflow
     assert 'echo "name=${IMAGE_NAME,,}"' in workflow
+    assert "needs: validate" in workflow
     assert "packages: write" in workflow
     assert "username: ${{ github.actor }}" in workflow
     assert "password: ${{ secrets.GITHUB_TOKEN }}" in workflow
-    compose = open("docker-compose.yml", encoding="utf-8").read()
-    example = open(".env.example", encoding="utf-8").read()
-    readme = open("README.md", encoding="utf-8").read()
-    assert expected_image in compose
-    assert expected_image in example
-    assert expected_image in readme
+    assert "latest=false" in workflow
+    assert "type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}" in workflow
+    assert "type=ref,event=tag" in workflow
+    assert "type=raw,value=v26.09.14" not in workflow
+    assert "workflow_dispatch" not in workflow
