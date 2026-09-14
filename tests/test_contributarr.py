@@ -271,6 +271,12 @@ def test_secrets_never_render_or_enter_session(app, owner_client):
         assert "another-secret" not in session.values()
 
 
+def test_owner_can_copy_generated_webhook_url(app, owner_client):
+    html = owner_client.get("/admin/settings").get_data(as_text=True)
+    assert "http://localhost/webhook/webhook-test" in html
+    assert "Show webhook secret" in html
+
+
 def test_legacy_tracker_import_preserves_rows(app, tmp_path):
     source = tmp_path / "tracker.db"
     legacy = sqlite3.connect(source)
