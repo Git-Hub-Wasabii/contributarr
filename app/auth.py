@@ -82,7 +82,8 @@ def plex_start():
     pin = response.json()
     session["plex_pin_id"] = pin["id"]
     session["plex_pin_code"] = pin["code"]
-    callback = current_app.config["EXTERNAL_URL"] + url_for("auth.plex_callback")
+    base_url = current_app.config["EXTERNAL_URL"] or request.url_root.rstrip("/")
+    callback = base_url + url_for("auth.plex_callback")
     query = urlencode({
         "clientID": current_app.config["PLEX_CLIENT_IDENTIFIER"],
         "code": pin["code"],

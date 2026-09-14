@@ -18,9 +18,10 @@ scheduler = BackgroundScheduler(daemon=True)
 def create_app(test_config=None):
     app = Flask(__name__, template_folder="../templates", static_folder="../static")
     app.config.from_object(Config)
+    app.config.update(Config.environment())
     if test_config: app.config.update(test_config)
-    Config.validate(app.config.get("TESTING", False))
-    Path(app.config["SESSION_FILE_DIR"]).mkdir(parents=True, exist_ok=True)
+    Config.prepare(app.config)
+    Config.validate(app.config, app.config.get("TESTING", False))
     app.config["SESSION_CACHELIB"] = FileSystemCache(cache_dir=app.config["SESSION_FILE_DIR"], threshold=500)
     count = app.config["PROXY_FIX_COUNT"]
     if count: app.wsgi_app = ProxyFix(app.wsgi_app, x_for=count, x_proto=count, x_host=count, x_port=count, x_prefix=count)

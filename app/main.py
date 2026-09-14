@@ -209,7 +209,14 @@ def settings():
         integrations[name] = {"url": configured["url"], "configured": bool(configured["url"] and configured["api_key"])}
     interval = int(get_setting("sync_interval_minutes", current_app.config["SYNC_INTERVAL_MINUTES"]))
     last_run = get_db().execute("SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1").fetchone()
-    return render_template("settings.html", owner=owner_record(), integrations=integrations, sync_interval=interval, last_run=last_run, currency=currency_code(), currencies=CURRENCIES)
+    public_base = current_app.config["EXTERNAL_URL"] or request.url_root.rstrip("/")
+    webhook_secret = current_app.config["WEBHOOK_SECRET"]
+    return render_template(
+        "settings.html", owner=owner_record(), integrations=integrations,
+        sync_interval=interval, last_run=last_run, currency=currency_code(),
+        currencies=CURRENCIES, webhook_secret=webhook_secret,
+        webhook_url=f"{public_base}/webhook/{webhook_secret}",
+    )
 
 
 @bp.post("/api/reconcile")
