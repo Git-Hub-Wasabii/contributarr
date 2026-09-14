@@ -308,7 +308,9 @@ def test_ghcr_workflow_is_repository_aware_and_gated():
     assert "username: ${{ github.actor }}" in workflow
     assert "password: ${{ secrets.GITHUB_TOKEN }}" in workflow
     assert "latest=false" in workflow
-    assert "type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}" in workflow
+    assert "if: github.ref_type == 'tag'" in workflow
+    assert "type=raw,value=latest" in workflow
     assert "type=ref,event=tag" in workflow
-    assert "type=raw,value=v26.09.14" not in workflow
+    assert "Refuse to overwrite an existing release tag" in workflow
+    assert not re.search(r"type=raw,value=v\d{2}\.\d{2}\.\d{2}", workflow)
     assert "workflow_dispatch" not in workflow

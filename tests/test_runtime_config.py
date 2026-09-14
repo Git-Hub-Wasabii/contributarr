@@ -5,8 +5,9 @@ from app.db import get_db, get_setting, set_setting
 
 
 ENVIRONMENT_NAMES = (
-    "APP_NAME", "TZ", "PORT", "DB_PATH", "EXTERNAL_URL", "SESSION_SECRET",
-    "SESSION_DIR", "WEBHOOK_SECRET", "SYNC_INTERVAL_MINUTES", "PROXY_FIX_COUNT",
+    "APP_NAME", "APP_VERSION", "BUILD_COMMIT", "TZ", "PORT", "DB_PATH",
+    "EXTERNAL_URL", "SESSION_SECRET", "SESSION_DIR", "WEBHOOK_SECRET",
+    "SYNC_INTERVAL_MINUTES", "PROXY_FIX_COUNT",
 )
 
 
@@ -36,6 +37,8 @@ def test_startup_without_environment_generates_distinct_persistent_secrets_and_d
     first_webhook_secret = first.config["WEBHOOK_SECRET"]
 
     assert first.config["APP_NAME"] == "Contributarr"
+    assert first.config["APP_VERSION"] == "dev"
+    assert first.config["BUILD_COMMIT"] == ""
     assert first.config["TZ"] == "Asia/Kuala_Lumpur"
     assert first.config["PORT"] == 9096
     assert first.config["SYNC_INTERVAL_MINUTES"] == 60
@@ -103,6 +106,8 @@ def test_standard_environment_values_override_application_defaults(tmp_path, mon
     clean_environment(monkeypatch)
     data = tmp_path / "custom-data"
     monkeypatch.setenv("APP_NAME", "Custom Contributarr")
+    monkeypatch.setenv("APP_VERSION", "v99.12.31")
+    monkeypatch.setenv("BUILD_COMMIT", "0123456789abcdef")
     monkeypatch.setenv("TZ", "UTC")
     monkeypatch.setenv("PORT", "9191")
     monkeypatch.setenv("DB_PATH", str(data / "custom.db"))
@@ -111,6 +116,8 @@ def test_standard_environment_values_override_application_defaults(tmp_path, mon
     monkeypatch.setenv("PROXY_FIX_COUNT", "2")
     app = create_app({"TESTING": True})
     assert app.config["APP_NAME"] == "Custom Contributarr"
+    assert app.config["APP_VERSION"] == "v99.12.31"
+    assert app.config["BUILD_COMMIT"] == "0123456789abcdef"
     assert app.config["TZ"] == "UTC"
     assert app.config["PORT"] == 9191
     assert app.config["DB_PATH"] == str(data / "custom.db")
