@@ -13,6 +13,7 @@
     <a class="brand" href="{{ url_for('main.index') }}" title="Open your Contributarr home page">Contributarr</a>
     {% if session.get('plex_id') %}
     <nav aria-label="Primary navigation">
+      <a href="{{ url_for('main.home') }}" title="View contribution, usage, play, and recent-request leaderboards">Home</a>
       {% if session.get('user_id') %}<a href="{{ url_for('main.user_page', user_id=session.get('user_id')) }}" title="View your personal usage and quota">My page</a>{% endif %}
       {% if current_owner() %}
       <a href="{{ url_for('main.dashboard') }}" title="View global storage and Seerr request statistics">Dashboard</a>
