@@ -8,17 +8,15 @@ The first successful Plex sign-in becomes the administrator. Initially deploy Co
 
 After the claim, other Plex users may sign in. They can access only their own statistics, request history, and remaining quota. The administrator can access the global dashboard, every user page, reconciliation controls, integration configuration, and identity mapping.
 
-## Version
-
-Current release: **v26.09.14**
+[![Latest GitHub release](https://img.shields.io/github/v/release/Git-Hub-Wasabii/Contributarr?display_name=tag)](https://github.com/Git-Hub-Wasabii/Contributarr/releases/latest)
 
 ## Publish to GHCR
 
-The included `publish-ghcr` workflow derives its lowercase GHCR namespace from the repository running the workflow and builds Linux AMD64 and ARM64 images. The official repository publishes:
+The included workflow derives its lowercase GHCR namespace from the repository running it and builds Linux AMD64 and ARM64 release images. `latest` always means the latest official stable GitHub Release. For reproducible deployment, replace `latest` in Compose with a specific CalVer tag:
 
 ```text
-ghcr.io/git-hub-wasabii/contributarr:v26.09.14
 ghcr.io/git-hub-wasabii/contributarr:latest
+ghcr.io/git-hub-wasabii/contributarr:v26.09.14  # pinned example
 ```
 
 GitHub packages may initially be private. Open the package on GitHub, choose **Package settings**, then change its visibility to **Public** so Docker hosts can pull without registry credentials.
@@ -150,6 +148,29 @@ docker compose logs --tail=100 contributarr
 ```
 
 Normal updates preserve `contributarr-data` and do not require cloning, `git pull`, `.env`, or `docker compose down`. The supplied Compose file follows `latest`; advanced users can edit its image reference to pin a version tag.
+
+## Releases
+
+Release versions use `vYY.MM.DD`; append `.1`, `.2`, and so on for additional releases on the same day. The Git tag is the only release-version source. Main-branch pushes run all tests and Docker validation but do not update `latest` or create a GitHub Release.
+
+Maintainer release process:
+
+1. Merge tested changes into `main` and confirm its validation run succeeds.
+2. Choose a new CalVer tag and create the GitHub Release once:
+
+   ```bash
+   VERSION=v26.09.14
+   gh release create "$VERSION" --target main --generate-notes --title "$VERSION"
+   ```
+
+3. GitHub Actions validates that tagged source again.
+4. On success, the same multi-platform manifest is published as both the exact tag and `latest`.
+
+The workflow rejects malformed dates and refuses to overwrite an existing GHCR version tag. Release tags are immutable: never move or recreate one; use a new same-day suffix for a correction. Prerelease-style tags are intentionally rejected so they cannot move `latest`. Repository rules should also protect the `v*` tag namespace from updates and deletion.
+
+No `edge` image is published. Contributarr's standard deployment channel is deliberately limited to stable releases.
+
+For clearer Git history and generated release notes, contributors are encouraged—but not required by tooling—to start commit and pull-request titles with `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, or `ci:`.
 
 ## Tests
 

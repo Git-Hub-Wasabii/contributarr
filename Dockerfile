@@ -1,11 +1,11 @@
 FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-ARG APP_VERSION=v26.09.14
+ARG APP_VERSION=dev
+ARG BUILD_COMMIT=unknown
+ENV APP_VERSION="${APP_VERSION}" BUILD_COMMIT="${BUILD_COMMIT}"
 LABEL org.opencontainers.image.title="Contributarr" \
-      org.opencontainers.image.version="${APP_VERSION}" \
-      org.opencontainers.image.description="Permanent storage contribution tracking for Seerr media requests" \
-      org.opencontainers.image.source="https://github.com/Git-Hub-Wasabii/Contributarr"
+      org.opencontainers.image.description="Permanent storage contribution tracking for Seerr media requests"
 WORKDIR /app
 
 COPY requirements.txt .

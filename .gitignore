@@ -7,5 +7,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+*.zip
 Unused-Safe to Delete/*
 !Unused-Safe to Delete/README.md
