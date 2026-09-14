@@ -14,6 +14,8 @@ jobs:
   validate:
     name: Python tests and Docker validation
     runs-on: ubuntu-latest
+    outputs:
+      stable_release: ${{ steps.release-tag.outputs.stable_release }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -34,23 +36,21 @@ jobs:
         run: python -m pytest -q
 
       - name: Validate release tag
+        id: release-tag
         if: github.ref_type == 'tag'
         shell: bash
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          if [[ ! "$tag" =~ ^v([0-9]{2})\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])(\.[1-9][0-9]*)?$ ]]; then
-            echo "::error::Release tags must use vYY.MM.DD or vYY.MM.DD.N (N starts at 1)."
+          semver_regex='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+          if [[ ! "$tag" =~ $semver_regex ]]; then
+            echo "::error::Release tags must use SemVer such as v1.0.0 or v1.0.0-beta.1."
             exit 1
           fi
-          release_date="20${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
-          parsed_date="$(date --utc --date "$release_date" +%F 2>/dev/null)" || {
-            echo "::error::Release tag contains an invalid calendar date: $tag"
-            exit 1
-          }
-          if [[ "$parsed_date" != "$release_date" ]]; then
-            echo "::error::Release tag contains an invalid calendar date: $tag"
-            exit 1
+          if [[ "$tag" == *-* ]]; then
+            echo "stable_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "stable_release=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Set up Docker Buildx
@@ -115,7 +115,7 @@ jobs:
             latest=false
           tags: |
             type=ref,event=tag
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ needs.validate.outputs.stable_release == 'true' }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -138,7 +138,7 @@ jobs:
           inspect_status=$?
           set -e
           if [[ $inspect_status -eq 0 ]]; then
-            echo "::error::${GITHUB_REF_NAME} already exists in GHCR. Release tags are immutable; create a new CalVer tag instead."
+            echo "::error::${GITHUB_REF_NAME} already exists in GHCR. Release tags are immutable; create a new SemVer tag instead."
             exit 1
           fi
           if ! grep -Eqi 'not found|manifest unknown|name unknown' <<<"$inspect_output"; then
