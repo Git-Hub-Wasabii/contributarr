@@ -131,14 +131,31 @@ def test_radarr_checks_both_instances():
     size, source = observed_charge({"media_type":"movie","tmdb_id":1,"tvdb_id":None,"seasons":[]}, {"radarr_1080":first,"radarr_4k":second})
     assert (size, source, first.calls, second.calls) == (9_000, "Radarr 4K", 1, 1)
     first.size = 7_000
-    observed_charge({"media_type":"movie","tmdb_id":1,"tvdb_id":None,"seasons":[]}, {"radarr_1080":first,"radarr_4k":second})
+    size, source = observed_charge({"media_type":"movie","tmdb_id":1,"tvdb_id":None,"seasons":[]}, {"radarr_1080":first,"radarr_4k":second})
+    assert (size, source) == (16_000, "Radarr 1080p + Radarr 4K")
     assert (first.calls, second.calls) == (2, 2)
+
+
+def test_movie_accounting_handles_each_copy_and_same_physical_file():
+    class Radarr:
+        def __init__(self, size, path=None): self.size, self.path = size, path
+        def observation_for_tmdb(self, _): return {"bytes":self.size,"physical_id":f"path:{self.path}" if self.path else None}
+    request_data = {"media_type":"movie","tmdb_id":7,"tvdb_id":None,"seasons":[]}
+    size, source = observed_charge(request_data, {"radarr_1080":Radarr(8_000),"radarr_4k":Radarr(0)})
+    assert (size, source) == (8_000, "Radarr 1080p")
+    size, source = observed_charge(request_data, {"radarr_1080":Radarr(0),"radarr_4k":Radarr(12_000)})
+    assert (size, source) == (12_000, "Radarr 4K")
+    size, source = observed_charge(request_data, {"radarr_1080":Radarr(8_000),"radarr_4k":Radarr(12_000)})
+    assert (size, source) == (20_000, "Radarr 1080p + Radarr 4K")
+    size, source = observed_charge(request_data, {"radarr_1080":Radarr(8_000,"/media/shared.mkv"),"radarr_4k":Radarr(8_000,"/media/shared.mkv")})
+    assert size == 8_000 and source == "Radarr 1080p + Radarr 4K"
 
 
 def test_sonarr_sums_only_requested_seasons():
     client = SonarrClient("http://sonarr", "key")
     client.series_for = lambda _: {"statistics":{"seasonStatistics":[{"seasonNumber":1,"sizeOnDisk":100},{"seasonNumber":2,"sizeOnDisk":250},{"seasonNumber":3,"sizeOnDisk":500}]}}
     assert client.size_for_seasons(99, [1, 3]) == 600
+    assert client.size_for_seasons(99, []) == 850
 
 
 def test_charge_never_decreases_and_deleted_media_does_not_refund(app):
@@ -146,7 +163,9 @@ def test_charge_never_decreases_and_deleted_media_does_not_refund(app):
     class Radarr:
         size = 8_000
         def size_for_tmdb(self, _): return self.size
-    radarr = Radarr(); clients = {"radarr_1080":radarr,"radarr_4k":radarr}
+    class EmptyRadarr:
+        def size_for_tmdb(self, _): return 0
+    radarr = Radarr(); clients = {"radarr_1080":radarr,"radarr_4k":EmptyRadarr()}
     with app.app_context():
         reconcile_one(item, clients)
         radarr.size = 0
@@ -155,6 +174,66 @@ def test_charge_never_decreases_and_deleted_media_does_not_refund(app):
         assert db.execute("SELECT charged_bytes FROM requests WHERE seerr_request_id=10").fetchone()[0] == 8_000
         assert db.execute("SELECT COUNT(*) FROM usage_ledger").fetchone()[0] == 1
         assert db.execute("SELECT is_deleted FROM requests WHERE seerr_request_id=10").fetchone()[0] == 0
+
+
+def test_duplicate_movie_requests_are_deterministic_and_idempotent(app):
+    class Radarr:
+        def __init__(self, size): self.size = size
+        def size_for_tmdb(self, _): return self.size
+    first = {"id":20,"status":5,"createdAt":"2026-01-01T00:00:00Z","requestedBy":{"id":1,"displayName":"First"},"media":{"mediaType":"movie","tmdbId":700,"title":"Duplicate Movie"}}
+    second = {"id":21,"status":5,"createdAt":"2026-01-02T00:00:00Z","requestedBy":{"id":2,"displayName":"Second"},"media":{"mediaType":"movie","tmdbId":700,"title":"Duplicate Movie"}}
+    clients = {"radarr_1080":Radarr(8_000),"radarr_4k":Radarr(12_000)}
+    with app.app_context():
+        claims, highwaters = {}, {}
+        reconcile_one(first, clients, claims, highwaters)
+        reconcile_one(second, clients, claims, highwaters)
+        db = get_db()
+        rows = db.execute("SELECT seerr_request_id,charged_bytes,deduplicated_bytes,servarr_source FROM requests ORDER BY seerr_request_id").fetchall()
+        assert (rows[0]["charged_bytes"], rows[1]["charged_bytes"]) == (20_000, 0)
+        assert rows[1]["deduplicated_bytes"] == 20_000 and "Duplicate of Seerr request #20" in rows[1]["servarr_source"]
+        ledger_count = db.execute("SELECT COUNT(*) FROM usage_ledger").fetchone()[0]
+        claims, highwaters = {}, {}
+        reconcile_one(first, clients, claims, highwaters)
+        reconcile_one(second, clients, claims, highwaters)
+        assert db.execute("SELECT COUNT(*) FROM usage_ledger").fetchone()[0] == ledger_count
+
+
+def test_overlapping_tv_requests_charge_each_season_once(app):
+    class Sonarr:
+        sizes = {1:100,2:200,3:300}
+        def season_observations(self, _tvdb, seasons): return [{"season":season,"bytes":self.sizes[season]} for season in seasons]
+        def size_for_seasons(self, _tvdb, seasons): return sum(self.sizes[season] for season in seasons)
+    clients = {"sonarr":Sonarr()}
+    first = {"id":30,"status":5,"createdAt":"2026-01-01T00:00:00Z","requestedBy":{"id":1,"displayName":"First"},"seasons":[1,2],"media":{"mediaType":"tv","tmdbId":70,"tvdbId":700,"title":"Shared Series"}}
+    second = {"id":31,"status":5,"createdAt":"2026-01-02T00:00:00Z","requestedBy":{"id":2,"displayName":"Second"},"seasons":[2,3],"media":{"mediaType":"tv","tmdbId":70,"tvdbId":700,"title":"Shared Series"}}
+    with app.app_context():
+        claims, highwaters = {}, {}
+        reconcile_one(first, clients, claims, highwaters)
+        reconcile_one(second, clients, claims, highwaters)
+        rows = get_db().execute("SELECT seerr_request_id,charged_bytes,servarr_source FROM requests ORDER BY seerr_request_id").fetchall()
+        assert (rows[0]["charged_bytes"], rows[1]["charged_bytes"]) == (300, 300)
+        assert rows[0]["servarr_source"] == "Sonarr seasons 1, 2"
+        assert "Sonarr seasons 3" in rows[1]["servarr_source"] and "#30" in rows[1]["servarr_source"]
+
+
+def test_file_growth_increases_charge_and_shrink_keeps_highwater(app):
+    item = {"id":40,"status":5,"requestedBy":{"id":1,"displayName":"Owner"},"media":{"mediaType":"movie","tmdbId":740,"title":"Growing Movie"}}
+    class Radarr:
+        def __init__(self, size): self.size = size
+        def size_for_tmdb(self, _): return self.size
+    class Empty:
+        def size_for_tmdb(self, _): return 0
+    radarr, clients = Radarr(10_000), None
+    clients = {"radarr_1080":radarr,"radarr_4k":Empty()}
+    with app.app_context():
+        reconcile_one(item, clients)
+        radarr.size = 15_000
+        reconcile_one(item, clients)
+        radarr.size = 7_000
+        reconcile_one(item, clients)
+        row = get_db().execute("SELECT charged_bytes,observed_bytes FROM requests WHERE seerr_request_id=40").fetchone()
+        assert tuple(row) == (15_000, 7_000)
+        assert get_db().execute("SELECT COUNT(*) FROM usage_ledger WHERE request_id=(SELECT id FROM requests WHERE seerr_request_id=40)").fetchone()[0] == 2
 
 
 def test_seerr_details_supply_media_name_and_original_request_date(app):
@@ -252,12 +331,12 @@ def test_ledger_paginates_with_supported_page_sizes(app, owner_client, seeded_us
             cur = db.execute("INSERT INTO requests(seerr_request_id,user_id,seerr_user_id,display_username,title,media_type,charged_bytes,first_seen_at,last_updated_at,requested_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (500+index,seeded_user,"42","Alice",f"Ledger title {index:02d}","movie",index+1,now,now,f"2026-08-{(index % 28)+1:02d}T00:00:00+00:00"))
             db.execute("INSERT INTO usage_ledger(request_id,user_id,delta_bytes,total_charged_bytes,created_at) VALUES(?,?,?,?,?)", (cur.lastrowid,seeded_user,index+1,index+1,now))
     first = owner_client.get("/dashboard").get_data(as_text=True)
-    assert first.count('data-label="User"') == 25 and "1–25 of 30" in first
-    second = owner_client.get("/dashboard?ledger_page=2&ledger_per_page=25").get_data(as_text=True)
-    assert second.count('data-label="User"') == 5 and "26–30 of 30" in second
+    assert first.count('data-label="User"') == 10 and "1–10 of 30" in first
+    second = owner_client.get("/dashboard?ledger_page=2&ledger_per_page=10").get_data(as_text=True)
+    assert second.count('data-label="User"') == 10 and "11–20 of 30" in second
     fifty = owner_client.get("/dashboard?ledger_per_page=50").get_data(as_text=True)
     assert fifty.count('data-label="User"') == 30
-    for size in (25, 50, 100, 250):
+    for size in (10, 25, 50, 100, 250):
         assert f'<option value="{size}"' in first
 
 
@@ -293,6 +372,30 @@ def test_users_page_shows_manual_adjustment_history(app, owner_client, seeded_us
     assert "-0.50 GB" in html and "15 Sep 2026, 00:15" in html
 
 
+def test_users_and_adjustments_default_to_ten_rows_and_adjustment_can_be_undone(app, owner_client, seeded_user):
+    with app.app_context():
+        db, now = get_db(), utcnow()
+        for index in range(14):
+            db.execute("INSERT INTO users(display_name,created_at,updated_at) VALUES(?,?,?)", (f"Paged User {index:02d}",now,now))
+        original_id = None
+        for index in range(12):
+            adjustment_id = db.execute("INSERT INTO manual_adjustments(user_id,bytes,note,created_at) VALUES(?,?,?,?)", (seeded_user,1_000+index,f"Adjustment {index}",now)).lastrowid
+            original_id = original_id or adjustment_id
+    html = owner_client.get("/admin/users").get_data(as_text=True)
+    assert html.count('class="settings-row user-row"') == 10
+    assert html.count('data-label="Adjustment"') == 10
+    assert "1–10 of 15" in html and "1–10 of 12" in html
+    assert '<option value="10" selected' in html
+    token = re.search(r'name="csrf_token" value="([^"]+)"', html).group(1)
+    response = owner_client.post("/admin/users", data={"csrf_token":token,"action":"undo_adjustment","adjustment_id":original_id}, follow_redirects=True)
+    assert response.status_code == 200 and b"Undo adjustment" in response.data
+    with app.app_context():
+        original = get_db().execute("SELECT reversed_at,reversed_by_adjustment_id FROM manual_adjustments WHERE id=?", (original_id,)).fetchone()
+        reversal = get_db().execute("SELECT bytes,reversal_of_adjustment_id FROM manual_adjustments WHERE id=?", (original["reversed_by_adjustment_id"],)).fetchone()
+        assert original["reversed_at"] and tuple(reversal) == (-1_000, original_id)
+        assert get_db().execute("SELECT SUM(bytes) FROM manual_adjustments WHERE id IN (?,?)", (original_id, original["reversed_by_adjustment_id"])).fetchone()[0] == 0
+
+
 def test_home_has_requested_leaderboards_and_handles_tautulli_outage(app, owner_client, seeded_user, monkeypatch):
     with app.app_context():
         from app.db import set_secret, set_setting
@@ -302,9 +405,33 @@ def test_home_has_requested_leaderboards_and_handles_tautulli_outage(app, owner_
     def fail(*_args, **_kwargs): raise IntegrationError("Tautulli unavailable")
     monkeypatch.setattr("app.main.TautulliClient.history", fail)
     html = owner_client.get("/home").get_data(as_text=True)
-    assert "Contribution leaderboard" in html and "Usage leaderboard" in html
+    assert "Contribution leaderboard" in html and "Most active users" in html
     assert "Top plays" in html and "Recently requested media" in html
     assert "Tautulli unavailable" in html and "MYR 25.00" in html
+
+
+def test_home_limits_rows_uses_tautulli_activity_and_links_top_media(app, owner_client, seeded_user, monkeypatch):
+    with app.app_context():
+        from app.db import set_secret, set_setting
+        db, now = get_db(), utcnow()
+        set_setting("integration.TAUTULLI.url", "http://tautulli.local:8181")
+        set_secret("integration.TAUTULLI.api_key", "key")
+        set_setting("integration.SEERR.url", "http://seerr.local:5055")
+        db.execute("INSERT INTO identity_mappings(user_id,provider,external_id,username,normalized_username) VALUES(?,?,?,?,?)", (seeded_user,"tautulli","9","Alice","alice"))
+        for index in range(11):
+            db.execute("INSERT INTO requests(seerr_request_id,user_id,seerr_user_id,display_username,title,media_type,tmdb_id,first_seen_at,last_updated_at,seerr_status,requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (800+index,seeded_user,"42","Alice",f"Recent {index:02d}","movie",900+index,now,now,"5",f"2026-09-{index+1:02d}T00:00:00+00:00"))
+    history = [
+        {"user_id":"9","user":"Alice","title":"Recent 10","full_title":"Recent 10","duration":100,"rating_key":"55"},
+        {"user_id":"9","user":"Alice","title":"Recent 10","full_title":"Recent 10","duration":120,"rating_key":"55"},
+        {"user_id":"10","user":"Bob","title":"Unrequested","duration":50,"rating_key":"77"},
+    ]
+    monkeypatch.setattr("app.main.TautulliClient.history", lambda *_args, **_kwargs: history)
+    html = owner_client.get("/home").get_data(as_text=True)
+    assert "Most active users" in html and "Alice" in html and "2 plays" in html
+    assert 'href="http://seerr.local:5055/movie/910"' in html
+    assert 'href="http://tautulli.local:8181/info?rating_key=77"' in html
+    assert html.count('class="recent-media"') == 9
+    assert 'href="http://tautulli.local:8181/info?rating_key=55"' not in html
 
 
 def test_current_seerr_media_uses_balanced_responsive_grid(owner_client):
@@ -314,7 +441,14 @@ def test_current_seerr_media_uses_balanced_responsive_grid(owner_client):
     assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in css
     assert ".request-bucket--available { grid-column: span 2; }" in css
     assert ".request-bucket--available .request-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr))" in css
-    assert "overflow-y: auto" not in css
+    assert "max-height: 394px" in css and "overflow-y: auto" in css
+    assert "scrollbar-gutter: stable" in css
+
+
+def test_help_icons_light_on_hover_not_click(owner_client):
+    css = open("static/app.css", encoding="utf-8").read()
+    assert ".help:hover, .help:focus-visible" in css
+    assert ".help:active" not in css
 
 
 def test_admin_can_change_automatic_sync_schedule(app, owner_client):
