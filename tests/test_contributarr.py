@@ -429,9 +429,20 @@ def test_home_limits_rows_uses_tautulli_activity_and_links_top_media(app, owner_
     html = owner_client.get("/home").get_data(as_text=True)
     assert "Most active users" in html and "Alice" in html and "2 plays" in html
     assert 'href="http://seerr.local:5055/movie/910"' in html
-    assert 'href="http://tautulli.local:8181/info?rating_key=77"' in html
+    assert 'href="http://seerr.local:5055/search?query=Unrequested"' in html
     assert html.count('class="recent-media"') == 9
-    assert 'href="http://tautulli.local:8181/info?rating_key=55"' not in html
+    assert "http://tautulli.local:8181/info" not in html
+
+
+def test_leaderboard_rows_align_and_adjustment_history_has_spacing(owner_client):
+    css = open("static/app.css", encoding="utf-8").read()
+    home = owner_client.get("/home").get_data(as_text=True)
+    users = owner_client.get("/admin/users").get_data(as_text=True)
+    assert home.count("leaderboard-panel") == 3 and home.count("leaderboard-header") == 3
+    assert ".leaderboard-header { height: 84px; flex: 0 0 84px; }" in css
+    assert "min-height: 48px" in css
+    assert 'class="adjustment-history-heading"' in users
+    assert ".adjustment-history-heading { margin-top: 28px; }" in css
 
 
 def test_current_seerr_media_uses_balanced_responsive_grid(owner_client):
