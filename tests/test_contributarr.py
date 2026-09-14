@@ -30,7 +30,7 @@ def test_mocked_plex_pin_flow_claims_owner_without_storing_token(app, client, mo
     response = client.get("/auth/plex/start")
     assert response.status_code == 302 and "app.plex.tv/auth" in response.location
     response = client.get("/auth/plex/callback")
-    assert response.status_code == 302 and response.location.endswith("/stats")
+    assert response.status_code == 302 and response.location.endswith("/home")
     with client.session_transaction() as session:
         assert session["plex_id"] == "plex-99"
         assert "temporary-plex-token" not in session.values()
@@ -67,6 +67,7 @@ def test_anonymous_redirect_and_non_owner_denied(app, client):
 
 
 def test_owner_pages_and_csrf(app, owner_client, seeded_user):
+    assert owner_client.get("/home").status_code == 200
     assert owner_client.get("/stats").status_code == 200
     assert owner_client.get("/dashboard").status_code == 200
     assert owner_client.get(f"/users/{seeded_user}").status_code == 200
@@ -172,17 +173,37 @@ def test_seerr_details_supply_media_name_and_original_request_date(app):
 
 
 def test_deleted_seerr_request_refunds_quota_and_moves_to_deleted_section(app, owner_client, seeded_user):
+    class EmptyRadarr:
+        def size_for_tmdb(self, _): return 0
     requested = "2026-09-01T02:30:00+00:00"
     with app.app_context():
         db = get_db()
         db.execute("UPDATE users SET contribution_myr=12.5 WHERE id=?", (seeded_user,))
         db.execute("INSERT INTO requests(seerr_request_id,user_id,seerr_user_id,display_username,title,media_type,tmdb_id,charged_bytes,first_seen_at,last_updated_at,requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (12,seeded_user,"42","Alice","Refunded Movie","movie",99,2_000_000_000,utcnow(),utcnow(),requested))
-        assert mark_deleted_requests([]) == 1
+        result = mark_deleted_requests([], {"radarr_1080": EmptyRadarr(), "radarr_4k": EmptyRadarr()})
+        assert result == {"deleted": 1, "restored": 0, "warnings": []}
         row = db.execute("SELECT charged_bytes,refunded_bytes,is_deleted FROM requests WHERE seerr_request_id=12").fetchone()
         assert tuple(row) == (0, 2_000_000_000, 1)
     html = owner_client.get(f"/users/{seeded_user}").get_data(as_text=True)
     assert "Deleted requests" in html and "Refunded Movie" in html and "2.00 GB" in html
     assert "01 Sep 2026, 10:30" in html
+
+
+def test_missing_seerr_request_remains_charged_while_media_exists(app, owner_client, seeded_user):
+    class Radarr:
+        def __init__(self, size): self.size = size
+        def size_for_tmdb(self, _): return self.size
+    with app.app_context():
+        db, now = get_db(), utcnow()
+        db.execute("INSERT INTO requests(seerr_request_id,user_id,seerr_user_id,display_username,title,media_type,tmdb_id,charged_bytes,first_seen_at,last_updated_at,seerr_status) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (13,seeded_user,"42","Alice","Still Stored","movie",100,2_000_000_000,now,now,"5"))
+        result = mark_deleted_requests([], {"radarr_1080":Radarr(2_000_000_000),"radarr_4k":Radarr(0)})
+        assert result["deleted"] == 0
+        row = db.execute("SELECT charged_bytes,is_deleted,seerr_status FROM requests WHERE seerr_request_id=13").fetchone()
+        assert tuple(row) == (2_000_000_000, 0, "removed_media_present")
+    html = owner_client.get(f"/users/{seeded_user}").get_data(as_text=True)
+    assert "Still Stored" in html
+    dashboard = owner_client.get("/dashboard").get_data(as_text=True)
+    assert "Still Stored" not in dashboard
 
 
 def test_mocked_seerr_reconciliation_imports_users_and_requests(app, monkeypatch):
@@ -214,12 +235,30 @@ def test_ledger_uses_username_full_hover_title_and_kuala_lumpur_time(app, owner_
     title = "The Lord of the Rings: The Fellowship of the Ring Extended Edition"
     with app.app_context():
         db = get_db(); created = "2026-01-01T00:00:00+00:00"
-        cur = db.execute("INSERT INTO requests(seerr_request_id,user_id,seerr_user_id,display_username,title,media_type,charged_bytes,first_seen_at,last_updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (88,seeded_user,"42","Alice",title,"movie",1_000_000_000,created,created))
+        requested = "2025-12-30T16:00:00+00:00"
+        cur = db.execute("INSERT INTO requests(seerr_request_id,user_id,seerr_user_id,display_username,title,media_type,charged_bytes,first_seen_at,last_updated_at,requested_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (88,seeded_user,"42","Alice",title,"movie",1_000_000_000,created,created,requested))
         db.execute("INSERT INTO usage_ledger(request_id,user_id,delta_bytes,total_charged_bytes,created_at) VALUES(?,?,?,?,?)", (cur.lastrowid,seeded_user,1_000_000_000,1_000_000_000,created))
     html = owner_client.get("/stats").get_data(as_text=True)
     assert "Alice" in html and "User 42" not in html
     assert f'title="{title}"' in html and ">" + title + "</a>" in html
-    assert "01 Jan 2026, 08:00" in html
+    assert "31 Dec 2025, 00:00" in html
+    assert "01 Jan 2026, 08:00" not in html
+
+
+def test_ledger_paginates_with_supported_page_sizes(app, owner_client, seeded_user):
+    with app.app_context():
+        db, now = get_db(), utcnow()
+        for index in range(30):
+            cur = db.execute("INSERT INTO requests(seerr_request_id,user_id,seerr_user_id,display_username,title,media_type,charged_bytes,first_seen_at,last_updated_at,requested_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (500+index,seeded_user,"42","Alice",f"Ledger title {index:02d}","movie",index+1,now,now,f"2026-08-{(index % 28)+1:02d}T00:00:00+00:00"))
+            db.execute("INSERT INTO usage_ledger(request_id,user_id,delta_bytes,total_charged_bytes,created_at) VALUES(?,?,?,?,?)", (cur.lastrowid,seeded_user,index+1,index+1,now))
+    first = owner_client.get("/dashboard").get_data(as_text=True)
+    assert first.count('data-label="User"') == 25 and "1–25 of 30" in first
+    second = owner_client.get("/dashboard?ledger_page=2&ledger_per_page=25").get_data(as_text=True)
+    assert second.count('data-label="User"') == 5 and "26–30 of 30" in second
+    fifty = owner_client.get("/dashboard?ledger_per_page=50").get_data(as_text=True)
+    assert fifty.count('data-label="User"') == 30
+    for size in (25, 50, 100, 250):
+        assert f'<option value="{size}"' in first
 
 
 def test_dashboard_capitalizes_media_and_links_to_seerr(app, owner_client, seeded_user):
@@ -232,6 +271,50 @@ def test_dashboard_capitalizes_media_and_links_to_seerr(app, owner_client, seede
     assert ">Movie</span>" in html
     assert 'href="http://seerr.local:5055/movie/88"' in html
     assert 'title="A Long Movie Name For Hovering"' in html
+
+
+def test_admin_can_choose_custom_media_link_base(app, owner_client, seeded_user):
+    page = owner_client.get("/admin/settings").get_data(as_text=True)
+    token = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
+    response = owner_client.post("/admin/settings", data={"csrf_token":token,"action":"links","link_mode":"custom","seerr_link_base_url":"https://seerr.example.test/"}, follow_redirects=True)
+    assert response.status_code == 200
+    with app.app_context():
+        now = utcnow()
+        get_db().execute("INSERT INTO requests(seerr_request_id,user_id,seerr_user_id,display_username,title,media_type,tmdb_id,first_seen_at,last_updated_at,seerr_status,requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (322,seeded_user,"42","Alice","External Link Movie","movie",89,now,now,"1",now))
+    html = owner_client.get("/dashboard").get_data(as_text=True)
+    assert 'href="https://seerr.example.test/movie/89"' in html
+
+
+def test_users_page_shows_manual_adjustment_history(app, owner_client, seeded_user):
+    with app.app_context():
+        get_db().execute("INSERT INTO manual_adjustments(user_id,bytes,note,created_at) VALUES(?,?,?,?)", (seeded_user,-500_000_000,"Storage correction","2026-09-14T16:15:00+00:00"))
+    html = owner_client.get("/admin/users").get_data(as_text=True)
+    assert "Manual adjustment history" in html and "Storage correction" in html
+    assert "-0.50 GB" in html and "15 Sep 2026, 00:15" in html
+
+
+def test_home_has_requested_leaderboards_and_handles_tautulli_outage(app, owner_client, seeded_user, monkeypatch):
+    with app.app_context():
+        from app.db import set_secret, set_setting
+        set_setting("integration.TAUTULLI.url", "http://tautulli.local:8181")
+        set_secret("integration.TAUTULLI.api_key", "key")
+        get_db().execute("UPDATE users SET contribution_myr=25 WHERE id=?", (seeded_user,))
+    def fail(*_args, **_kwargs): raise IntegrationError("Tautulli unavailable")
+    monkeypatch.setattr("app.main.TautulliClient.history", fail)
+    html = owner_client.get("/home").get_data(as_text=True)
+    assert "Contribution leaderboard" in html and "Usage leaderboard" in html
+    assert "Top plays" in html and "Recently requested media" in html
+    assert "Tautulli unavailable" in html and "MYR 25.00" in html
+
+
+def test_current_seerr_media_uses_balanced_responsive_grid(owner_client):
+    html = owner_client.get("/dashboard").get_data(as_text=True)
+    css = open("static/app.css", encoding="utf-8").read()
+    assert "request-bucket--available" in html and "No failed requests." in html
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in css
+    assert ".request-bucket--available { grid-column: span 2; }" in css
+    assert ".request-bucket--available .request-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr))" in css
+    assert "overflow-y: auto" not in css
 
 
 def test_admin_can_change_automatic_sync_schedule(app, owner_client):
