@@ -69,9 +69,9 @@ def ensure_plex_user(plex_id, username):
 @bp.get("/login")
 def login():
     if current_owner():
-        return redirect(url_for("main.dashboard"))
+        return redirect(url_for("main.home"))
     if session.get("plex_id") and session.get("user_id"):
-        return redirect(url_for("main.user_page", user_id=session["user_id"]))
+        return redirect(url_for("main.home"))
     return render_template("login.html", claimed=owner_record() is not None)
 
 
@@ -113,14 +113,14 @@ def plex_callback():
     account_response.raise_for_status()
     account = account_response.json()
     plex_id = str(account["id"])
-    is_owner = claim_owner(plex_id, account.get("username") or "Plex user", account.get("email"))
+    claim_owner(plex_id, account.get("username") or "Plex user", account.get("email"))
     user_id = ensure_plex_user(plex_id, account.get("username") or "Plex user")
     session.clear()  # The short-lived Plex token is deliberately discarded.
     session["plex_id"] = plex_id
     session["plex_username"] = account.get("username") or "Plex user"
     session["user_id"] = user_id
     current_app.session_interface.regenerate(session)
-    return redirect(url_for("main.dashboard" if is_owner else "main.user_page", **({} if is_owner else {"user_id": user_id})))
+    return redirect(url_for("main.home"))
 
 
 @bp.post("/logout")

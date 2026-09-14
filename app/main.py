@@ -1,4 +1,5 @@
 import json
+import math
 from datetime import datetime
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -13,6 +14,7 @@ from .reconcile import normalize, run_reconciliation
 bp = Blueprint("main", __name__)
 INTEGRATIONS = ("SEERR", "RADARR_1080", "RADARR_4K", "SONARR", "TAUTULLI")
 CURRENCIES = ("MYR", "USD", "SGD", "EUR", "GBP", "AUD", "CAD", "JPY", "CNY", "INR")
+LEDGER_PAGE_SIZES = (25, 50, 100, 250)
 
 
 def bytes_gb(value):
@@ -39,18 +41,25 @@ def money(value):
     return f"{currency_code()} {float(value or 0):,.2f}"
 
 
+def media_link_base():
+    custom = get_setting("links.seerr_base_url", "").rstrip("/")
+    if get_setting("links.mode", "internal") == "custom" and custom:
+        return custom
+    return integration_config("SEERR")["url"]
+
+
 def request_buckets(rows):
     definitions = [
-        ("Pending approval", {"1", "pending"}),
-        ("Approved or processing", {"2", "approved", "processing"}),
-        ("Partially available", {"3", "partial", "partially available"}),
-        ("Available", {"4", "5", "available"}),
-        ("Failed", {"failed", "declined"}),
+        ("pending", "Pending approval", {"1", "pending"}),
+        ("processing", "Approved or processing", {"2", "approved", "processing"}),
+        ("partial", "Partially available", {"3", "partial", "partially available"}),
+        ("available", "Available", {"4", "5", "available"}),
+        ("failed", "Failed", {"failed", "declined"}),
     ]
-    buckets = [{"label": label, "items": []} for label, _ in definitions]
+    buckets = [{"key": key, "label": label, "items": []} for key, label, _ in definitions]
     for row in rows:
         status = (row["seerr_status"] or "").lower()
-        target = next((index for index, (_, statuses) in enumerate(definitions) if status in statuses), 1)
+        target = next((index for index, (_, _, statuses) in enumerate(definitions) if status in statuses), 1)
         buckets[target]["items"].append(row)
     return buckets
 
@@ -58,8 +67,46 @@ def request_buckets(rows):
 @bp.get("/")
 @login_required
 def index():
-    destination = url_for("main.dashboard") if current_owner() else url_for("main.user_page", user_id=session["user_id"])
-    return redirect(destination)
+    return redirect(url_for("main.home"))
+
+
+@bp.get("/home")
+@login_required
+def home():
+    db = get_db()
+    leaders = db.execute(
+        "SELECT u.*,"
+        "COALESCE((SELECT SUM(r.charged_bytes) FROM requests r WHERE r.user_id=u.id),0)+"
+        "COALESCE((SELECT SUM(a.bytes) FROM manual_adjustments a WHERE a.user_id=u.id),0) charged_bytes "
+        "FROM users u WHERE u.enabled=1 ORDER BY u.display_name COLLATE NOCASE"
+    ).fetchall()
+    contribution_leaders = sorted(leaders, key=lambda row: (-float(row["contribution_myr"]), row["display_name"].casefold()))
+    usage_leaders = sorted(leaders, key=lambda row: (-int(row["charged_bytes"]), row["display_name"].casefold()))
+    recent_requests = db.execute(
+        "SELECT r.*,u.display_name FROM requests r LEFT JOIN users u ON u.id=r.user_id "
+        "WHERE r.is_deleted=0 AND (r.seerr_status IS NULL OR r.seerr_status!='removed_media_present') "
+        "ORDER BY COALESCE(r.requested_at,r.first_seen_at) DESC LIMIT 12"
+    ).fetchall()
+    top_plays, tautulli_warning = [], None
+    try:
+        configured = integration_config("TAUTULLI")
+        if configured["url"] and configured["api_key"]:
+            history = TautulliClient(configured["url"], configured["api_key"]).history(length=250)
+            grouped = {}
+            for item in history:
+                title = item.get("full_title") or item.get("title") or "Unknown"
+                grouped[title] = grouped.get(title, 0) + 1
+            top_plays = sorted(grouped.items(), key=lambda item: (-item[1], item[0].casefold()))[:10]
+        else:
+            tautulli_warning = "Tautulli is not configured."
+    except IntegrationError as exc:
+        tautulli_warning = str(exc)
+    return render_template(
+        "home.html", contribution_leaders=contribution_leaders[:10],
+        usage_leaders=usage_leaders[:10], recent_requests=recent_requests,
+        top_plays=top_plays, tautulli_warning=tautulli_warning,
+        currency=currency_code(), seerr_url=media_link_base(),
+    )
 
 
 @bp.get("/dashboard")
@@ -67,12 +114,35 @@ def index():
 @owner_required
 def dashboard():
     db = get_db()
+    try:
+        ledger_per_page = int(request.args.get("ledger_per_page", 25))
+    except (TypeError, ValueError):
+        ledger_per_page = 25
+    if ledger_per_page not in LEDGER_PAGE_SIZES:
+        ledger_per_page = 25
+    try:
+        ledger_page = max(1, int(request.args.get("ledger_page", 1)))
+    except (TypeError, ValueError):
+        ledger_page = 1
     totals = db.execute("SELECT COUNT(*) users,COALESCE(SUM(quota_bytes),0) quota FROM users WHERE enabled=1").fetchone()
     charged = db.execute("SELECT COALESCE(SUM(charged_bytes),0) n FROM requests r JOIN users u ON u.id=r.user_id WHERE u.enabled=1").fetchone()["n"]
     adjustments = db.execute("SELECT COALESCE(SUM(bytes),0) n FROM manual_adjustments a JOIN users u ON u.id=a.user_id WHERE u.enabled=1").fetchone()["n"]
     media = db.execute("SELECT media_type,COUNT(*) n FROM requests WHERE is_deleted=0 GROUP BY media_type").fetchall()
-    requests_rows = db.execute("SELECT r.*,u.display_name FROM requests r LEFT JOIN users u ON u.id=r.user_id WHERE r.is_deleted=0 ORDER BY requested_at DESC,last_updated_at DESC").fetchall()
-    ledger = db.execute("SELECT l.*,r.title,r.media_type,r.tmdb_id,r.seerr_request_id,COALESCE(u.display_name,r.display_username) username,r.servarr_source FROM usage_ledger l JOIN requests r ON r.id=l.request_id LEFT JOIN users u ON u.id=l.user_id ORDER BY l.created_at DESC LIMIT 100").fetchall()
+    requests_rows = db.execute(
+        "SELECT r.*,u.display_name FROM requests r LEFT JOIN users u ON u.id=r.user_id "
+        "WHERE r.is_deleted=0 AND (r.seerr_status IS NULL OR r.seerr_status!='removed_media_present') "
+        "ORDER BY requested_at DESC,last_updated_at DESC"
+    ).fetchall()
+    ledger_total = db.execute("SELECT COUNT(*) FROM usage_ledger").fetchone()[0]
+    ledger_pages = max(1, math.ceil(ledger_total / ledger_per_page))
+    ledger_page = min(ledger_page, ledger_pages)
+    ledger = db.execute(
+        "SELECT l.*,r.title,r.media_type,r.tmdb_id,r.seerr_request_id,r.requested_at,r.first_seen_at,"
+        "COALESCE(u.display_name,r.display_username) username,r.servarr_source "
+        "FROM usage_ledger l JOIN requests r ON r.id=l.request_id LEFT JOIN users u ON u.id=l.user_id "
+        "ORDER BY COALESCE(r.requested_at,r.first_seen_at) DESC,l.id DESC LIMIT ? OFFSET ?",
+        (ledger_per_page, (ledger_page - 1) * ledger_per_page),
+    ).fetchall()
     last_sync = db.execute("SELECT * FROM sync_runs WHERE success=1 ORDER BY id DESC LIMIT 1").fetchone()
     activity, tautulli_error = [], None
     try:
@@ -84,12 +154,15 @@ def dashboard():
     except IntegrationError as exc:
         tautulli_error = str(exc)
     counts = {row["media_type"]: row["n"] for row in media}
-    seerr_url = integration_config("SEERR")["url"]
+    seerr_url = media_link_base()
     return render_template(
         "stats.html", totals=totals, charged=charged + adjustments,
         remaining=max(0, totals["quota"] - charged - adjustments), counts=counts,
         request_groups=request_buckets(requests_rows), ledger=ledger, last_sync=last_sync,
         activity=activity, tautulli_error=tautulli_error, seerr_url=seerr_url,
+        ledger_page=ledger_page, ledger_pages=ledger_pages,
+        ledger_per_page=ledger_per_page, ledger_page_sizes=LEDGER_PAGE_SIZES,
+        ledger_total=ledger_total,
     )
 
 
@@ -130,7 +203,7 @@ def user_page(user_id):
             tautulli["most_watched"] = sorted(grouped.items(), key=lambda item: item[1], reverse=True)[:5]
         except IntegrationError as exc:
             warning = str(exc)
-    return render_template("user.html", user=user, identities=identities, requests=requests_rows, deleted_requests=deleted_requests, charged=charged, media_counts=media_counts, tautulli=tautulli, warning=warning, seerr_url=integration_config("SEERR")["url"])
+    return render_template("user.html", user=user, identities=identities, requests=requests_rows, deleted_requests=deleted_requests, charged=charged, media_counts=media_counts, tautulli=tautulli, warning=warning, seerr_url=media_link_base())
 
 
 @bp.route("/admin/users", methods=["GET", "POST"])
@@ -158,7 +231,11 @@ def users_admin():
         return redirect(url_for("main.users_admin"))
     users = db.execute("SELECT u.*,COALESCE(SUM(r.charged_bytes),0) charged_bytes FROM users u LEFT JOIN requests r ON r.user_id=u.id GROUP BY u.id ORDER BY u.display_name COLLATE NOCASE").fetchall()
     identities = db.execute("SELECT * FROM identity_mappings ORDER BY provider,username").fetchall()
-    return render_template("users.html", users=users, identities=identities, currency=currency_code())
+    adjustment_history = db.execute(
+        "SELECT a.*,u.display_name FROM manual_adjustments a JOIN users u ON u.id=a.user_id "
+        "ORDER BY a.created_at DESC,a.id DESC"
+    ).fetchall()
+    return render_template("users.html", users=users, identities=identities, adjustment_history=adjustment_history, currency=currency_code())
 
 
 @bp.route("/admin/settings", methods=["GET", "POST"])
@@ -195,6 +272,19 @@ def settings():
             currency = request.form.get("currency", "").upper()
             if currency not in CURRENCIES: abort(400)
             set_setting("currency", currency)
+        elif action == "links":
+            mode = request.form.get("link_mode", "internal")
+            custom_url = request.form.get("seerr_link_base_url", "").strip().rstrip("/")
+            if mode not in {"internal", "custom"}:
+                abort(400)
+            parsed = urlparse(custom_url)
+            if custom_url and (parsed.scheme not in {"http", "https"} or not parsed.netloc):
+                abort(400)
+            if mode == "custom" and not custom_url:
+                abort(400)
+            with transaction(get_db()):
+                set_setting("links.mode", mode)
+                set_setting("links.seerr_base_url", custom_url)
         elif action == "sync":
             result = run_reconciliation("manual")
             flash(result["message"], "success" if result.get("ok") else "warning")
@@ -211,11 +301,14 @@ def settings():
     last_run = get_db().execute("SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1").fetchone()
     public_base = current_app.config["EXTERNAL_URL"] or request.url_root.rstrip("/")
     webhook_secret = current_app.config["WEBHOOK_SECRET"]
+    link_mode = get_setting("links.mode", "internal")
+    seerr_link_base_url = get_setting("links.seerr_base_url", "")
     return render_template(
         "settings.html", owner=owner_record(), integrations=integrations,
         sync_interval=interval, last_run=last_run, currency=currency_code(),
         currencies=CURRENCIES, webhook_secret=webhook_secret,
         webhook_url=f"{public_base}/webhook/{webhook_secret}",
+        link_mode=link_mode, seerr_link_base_url=seerr_link_base_url,
     )
 
 

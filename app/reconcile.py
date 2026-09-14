@@ -119,17 +119,50 @@ def reconcile_one(item, c):
         db.execute("INSERT INTO usage_ledger(request_id,user_id,delta_bytes,total_charged_bytes,source,created_at) VALUES(?,?,?,?,?,?)", (request_id, user_id, charged - previous, charged, source, now))
 
 
-def mark_deleted_requests(seen_request_ids):
-    """Refund requests removed from a successfully retrieved complete Seerr list."""
+def mark_deleted_requests(seen_request_ids, integration_clients):
+    """Classify missing Seerr requests only after checking their Servarr size."""
     db, now = get_db(), utcnow()
     seen = {int(value) for value in seen_request_ids}
-    rows = db.execute("SELECT id,seerr_request_id,charged_bytes FROM requests WHERE is_deleted=0").fetchall()
-    deleted = 0
+    rows = db.execute("SELECT * FROM requests").fetchall()
+    deleted = restored = 0
+    warnings = []
     for row in rows:
-        if row["seerr_request_id"] in seen: continue
-        db.execute("UPDATE requests SET refunded_bytes=charged_bytes,charged_bytes=0,is_deleted=1,deleted_at=?,last_updated_at=?,seerr_status='deleted' WHERE id=?", (now, now, row["id"]))
-        deleted += 1
-    return deleted
+        if row["seerr_request_id"] in seen:
+            continue
+        if (row["media_type"] == "movie" and not row["tmdb_id"]) or (row["media_type"] == "tv" and not row["tvdb_id"]):
+            warnings.append(f"Could not verify deleted request {row['seerr_request_id']}: stable media ID is missing.")
+            continue
+        request_data = {
+            "media_type": row["media_type"], "tmdb_id": row["tmdb_id"],
+            "tvdb_id": row["tvdb_id"], "seasons": json.loads(row["requested_seasons"] or "[]"),
+        }
+        try:
+            observed, source = observed_charge(request_data, integration_clients)
+        except Exception as exc:
+            warnings.append(f"Could not verify deleted request {row['seerr_request_id']}: {exc}")
+            continue
+        historical = max(int(row["charged_bytes"] or 0), int(row["refunded_bytes"] or 0))
+        if observed > 0:
+            restored_charge = max(historical, observed)
+            if row["is_deleted"] or restored_charge != row["charged_bytes"] or row["seerr_status"] != "removed_media_present":
+                db.execute(
+                    "UPDATE requests SET charged_bytes=?,refunded_bytes=0,is_deleted=0,deleted_at=NULL,last_updated_at=?,servarr_source=COALESCE(?,servarr_source),seerr_status='removed_media_present' WHERE id=?",
+                    (restored_charge, now, source, row["id"]),
+                )
+                if restored_charge > historical:
+                    db.execute(
+                        "INSERT INTO usage_ledger(request_id,user_id,delta_bytes,total_charged_bytes,source,created_at) VALUES(?,?,?,?,?,?)",
+                        (row["id"], row["user_id"], restored_charge - historical, restored_charge, source, now),
+                    )
+                if row["is_deleted"]:
+                    restored += 1
+        elif not row["is_deleted"]:
+            db.execute(
+                "UPDATE requests SET refunded_bytes=charged_bytes,charged_bytes=0,is_deleted=1,deleted_at=?,last_updated_at=?,seerr_status='deleted' WHERE id=?",
+                (now, now, row["id"]),
+            )
+            deleted += 1
+    return {"deleted": deleted, "restored": restored, "warnings": warnings}
 
 
 def run_reconciliation(trigger="manual"):
@@ -167,9 +200,12 @@ def run_reconciliation(trigger="manual"):
                 errors += 1
                 messages.append(f"Request {item.get('id', '?')}: {exc}")
         with transaction(db):
-            deleted = mark_deleted_requests(item["id"] for item in request_items)
-        if deleted:
-            messages.append(f"Refunded {deleted} deleted Seerr request(s).")
+            deletion_result = mark_deleted_requests((item["id"] for item in request_items), c)
+        if deletion_result["deleted"]:
+            messages.append(f"Refunded {deletion_result['deleted']} deleted Seerr request(s) with no remaining Servarr storage.")
+        if deletion_result["restored"]:
+            messages.append(f"Restored {deletion_result['restored']} request(s) whose media still exists in Servarr.")
+        messages.extend(deletion_result["warnings"])
         success = errors == 0
         db.execute("UPDATE sync_runs SET completed_at=?,success=?,processed=?,errors=?,message=? WHERE id=?", (utcnow(), int(success), processed, errors, "; ".join(messages)[:2000] or trigger, run_id))
         return {"ok": success, "processed": processed, "errors": errors, "message": messages[0] if messages else "Reconciliation completed."}
