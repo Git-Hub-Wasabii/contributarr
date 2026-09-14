@@ -1,0 +1,70 @@
+name: Pull request validation
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Python tests and Docker validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run Python tests
+        run: python -m pytest -q
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Validate Docker image build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: contributarr:ci
+          cache-from: type=gha,scope=pr-${{ github.event.pull_request.number }}
+          cache-to: type=gha,mode=max,scope=pr-${{ github.event.pull_request.number }}
+
+      - name: Smoke-test container health
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup() {
+            docker logs contributarr-smoke || true
+            docker rm --force contributarr-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run --detach --name contributarr-smoke \
+            --publish 127.0.0.1:9096:9096 \
+            --env SESSION_SECRET=ci-session-secret-0123456789abcdef \
+            --env WEBHOOK_SECRET=ci-webhook-secret-0123456789abcdef \
+            contributarr:ci
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error http://127.0.0.1:9096/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
