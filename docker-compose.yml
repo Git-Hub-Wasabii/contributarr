@@ -1,0 +1,26 @@
+services:
+  contributarr:
+    image: ${CONTRIBUTARR_IMAGE:-ghcr.io/git-hub-wasabii/contributarr:latest}
+    pull_policy: always
+    container_name: contributarr
+    restart: unless-stopped
+    ports:
+      - "9096:9096"
+    environment:
+      APP_NAME: Contributarr
+      TZ: Asia/Kuala_Lumpur
+      PORT: 9096
+      DB_PATH: /data/contributarr.db
+      EXTERNAL_URL: ${EXTERNAL_URL}
+      SESSION_SECRET: ${SESSION_SECRET}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-60}
+      PROXY_FIX_COUNT: ${PROXY_FIX_COUNT:-0}
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9096/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

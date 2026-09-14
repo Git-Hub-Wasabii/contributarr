@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · Contributarr{% endblock %}
+{% block content %}
+<div class="heading"><div><p class="eyebrow">ADMIN DASHBOARD</p><h1>Storage overview <span class="help" tabindex="0" title="Global totals include enabled users and permanent historical charges.">?</span></h1><p>Permanent usage, current requests, and recent viewing activity across the instance.</p></div><a class="button secondary" href="{{ url_for('main.settings') }}" title="Open integration and synchronization settings">Manage settings</a></div>
+{% if tautulli_error %}<div class="notice warning"><strong>Tautulli warning:</strong> {{ tautulli_error }} Quota and request data remain available.</div>{% endif %}
+<section class="metric-grid" aria-label="Global storage totals">
+  <article title="Enabled internal users included in reports"><span>Tracked users</span><strong>{{ totals.users }}</strong></article>
+  <article title="Permanent request charges plus manual adjustments"><span>Lifetime charged</span><strong>{{ charged|gb }}</strong></article>
+  <article title="Combined quota assigned to enabled users"><span>Allocated quota</span><strong>{{ totals.quota|gb }}</strong></article>
+  <article title="Allocated quota minus lifetime charged usage"><span>Remaining quota</span><strong>{{ remaining|gb }}</strong></article>
+  <article title="Number of movie requests recorded"><span>Movies</span><strong>{{ counts.get('movie', 0) }}</strong></article>
+  <article title="Number of television requests recorded"><span>TV requests</span><strong>{{ counts.get('tv', 0) }}</strong></article>
+</section>
+<section class="panel" aria-labelledby="requests-heading"><div class="panel-head"><div><h2 id="requests-heading">Current Seerr media <span class="help" tabindex="0" title="Requests are grouped by their most recently synchronized Seerr status.">?</span></h2><p>Open a media title in Seerr or select its requester to view that user.</p></div><span>Last success: {{ last_sync.completed_at|localtime if last_sync else 'Never' }}</span></div>
+  <div class="request-board">
+  {% for group in request_groups %}<article class="request-bucket"><header><h3>{{ group.label }}</h3><span class="count" title="Items in this status">{{ group['items']|length }}</span></header><div class="request-list">
+    {% for item in group['items'] %}<div class="request-item"><a class="media-name" {% if seerr_url and item.tmdb_id %}href="{{ seerr_url }}/{{ item.media_type }}/{{ item.tmdb_id }}" target="_blank" rel="noreferrer"{% endif %} title="{{ item.title }}">{{ item.title }}</a><span><span class="badge">{{ item.media_type|media }}</span> · <a href="{{ url_for('main.user_page', user_id=item.user_id) }}" title="Open {{ item.display_name }}'s user page">{{ item.display_name }}</a></span></div>
+    {% else %}<p class="muted empty-bucket">No media in this status.</p>{% endfor %}
+  </div></article>{% endfor %}
+  </div>
+</section>
+<section class="panel" aria-labelledby="ledger-heading"><div class="panel-head"><div><h2 id="ledger-heading">Permanent Usage Ledger <span class="help" tabindex="0" title="The ledger preserves historical increases. Removing a media file does not refund it; removing the Seerr request records a quota refund separately.">?</span></h2><p>Historical storage charges, newest first.</p></div></div>
+<div class="table-wrap"><table><thead><tr><th>User</th><th>Media</th><th>Type</th><th>Source</th><th class="number">Charged</th><th>Date</th></tr></thead><tbody>
+{% for row in ledger %}<tr><td data-label="User"><a href="{{ url_for('main.user_page', user_id=row.user_id) }}" title="Open {{ row.username }}'s page">{{ row.username }}</a></td><td data-label="Media"><a class="request-title" {% if seerr_url and row.tmdb_id %}href="{{ seerr_url }}/{{ row.media_type }}/{{ row.tmdb_id }}" target="_blank" rel="noreferrer"{% endif %} title="{{ row.title }}">{{ row.title }}</a></td><td data-label="Type"><span class="badge">{{ row.media_type|media }}</span></td><td data-label="Source">{{ row.servarr_source or row.source or '—' }}</td><td data-label="Charged" class="number">{{ row.delta_bytes|gb }}</td><td data-label="Date">{{ row.created_at|localtime }}</td></tr>
+{% else %}<tr><td colspan="6" class="empty">No usage has been charged yet.</td></tr>{% endfor %}
+</tbody></table></div></section>
+<section class="panel" aria-labelledby="activity-heading"><h2 id="activity-heading">Recent Plex activity <span class="help" tabindex="0" title="Live viewing activity reported by Tautulli; outages do not affect quota data.">?</span></h2><p class="section-description">Recently active streams from Tautulli.</p>{% for item in activity %}<p><strong>{{ item.user or 'Unknown' }}</strong> · {{ item.full_title or item.title }}</p>{% else %}<p class="muted">No recent activity.</p>{% endfor %}</section>
+{% endblock %}

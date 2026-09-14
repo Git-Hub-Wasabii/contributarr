@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Contributarr{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <div class="logo">C</div><h1>Contributarr</h1>
+  <p>Permanent storage contribution tracking for your media server.</p>
+  <p class="claim-state">{% if claimed %}This instance has already been claimed.{% else %}This instance is unclaimed. The first Plex user to sign in will become its owner.{% endif %}</p>
+  {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+  <a class="button plex" href="{{ url_for('auth.plex_start') }}" title="Authenticate with Plex using its secure PIN sign-in page">Sign in with Plex</a>
+</section>
+{% endblock %}

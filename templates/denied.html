@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}Access denied · Contributarr{% endblock %}
+{% block content %}
+<section class="auth-card"><h1>Access denied</h1><p>You do not have permission to view this page.</p>
+<form method="post" action="{{ url_for('auth.logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="button" title="End this browser session and return to sign in">Log out</button></form></section>
+{% endblock %}

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}Contributarr{% endblock %}</title>
+  <script>document.documentElement.dataset.theme=localStorage.getItem('contributarr-theme')||'auto';</script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="{{ url_for('main.index') }}" title="Open your Contributarr home page">Contributarr</a>
+    {% if session.get('plex_id') %}
+    <nav aria-label="Primary navigation">
+      {% if session.get('user_id') %}<a href="{{ url_for('main.user_page', user_id=session.get('user_id')) }}" title="View your personal usage and quota">My page</a>{% endif %}
+      {% if current_owner() %}
+      <a href="{{ url_for('main.dashboard') }}" title="View global storage and Seerr request statistics">Dashboard</a>
+      <a href="{{ url_for('main.users_admin') }}" title="Manage users, quotas, adjustments, and identity mappings">Users</a>
+      <a href="{{ url_for('main.settings') }}" title="Configure integrations and automatic reconciliation">Settings</a>
+      {% endif %}
+      <label class="theme-control" title="Use your browser theme or override it for this browser">Theme
+        <select id="theme-select" aria-label="Color theme"><option value="auto">Auto</option><option value="light">Light</option><option value="dark">Dark</option></select>
+      </label>
+      <form method="post" action="{{ url_for('auth.logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link" title="End this browser session">Log out</button></form>
+    </nav>
+    {% endif %}
+  </header>
+  <main class="container">
+    {% for category,message in get_flashed_messages(with_categories=true) %}<div class="notice {{ category }}">{{ message }}</div>{% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer>Contributarr {{ config.APP_VERSION }}</footer>
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</body>
+</html>

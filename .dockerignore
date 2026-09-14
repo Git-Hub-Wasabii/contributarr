@@ -1,0 +1,10 @@
+.git
+.github
+.env
+data
+tests
+__pycache__
+*.py[cod]
+.pytest_cache
+.venv
+Unused-Safe to Delete

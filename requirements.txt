@@ -1,0 +1,10 @@
+Flask==3.1.2
+Flask-WTF==1.2.2
+Flask-Session==0.8.0
+cachelib==0.17.0
+cryptography==46.0.1
+gunicorn==23.0.0
+requests==2.32.5
+APScheduler==3.11.0
+click==8.2.1
+pytest==8.4.2

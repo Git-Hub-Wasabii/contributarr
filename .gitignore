@@ -1,0 +1,11 @@
+.env
+data/
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+Unused-Safe to Delete/*
+!Unused-Safe to Delete/README.md
