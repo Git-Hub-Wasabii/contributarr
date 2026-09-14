@@ -106,7 +106,7 @@ def test_standard_environment_values_override_application_defaults(tmp_path, mon
     clean_environment(monkeypatch)
     data = tmp_path / "custom-data"
     monkeypatch.setenv("APP_NAME", "Custom Contributarr")
-    monkeypatch.setenv("APP_VERSION", "v99.12.31")
+    monkeypatch.setenv("APP_VERSION", "v1.2.3-beta.1")
     monkeypatch.setenv("BUILD_COMMIT", "0123456789abcdef")
     monkeypatch.setenv("TZ", "UTC")
     monkeypatch.setenv("PORT", "9191")
@@ -116,7 +116,7 @@ def test_standard_environment_values_override_application_defaults(tmp_path, mon
     monkeypatch.setenv("PROXY_FIX_COUNT", "2")
     app = create_app({"TESTING": True})
     assert app.config["APP_NAME"] == "Custom Contributarr"
-    assert app.config["APP_VERSION"] == "v99.12.31"
+    assert app.config["APP_VERSION"] == "v1.2.3-beta.1"
     assert app.config["BUILD_COMMIT"] == "0123456789abcdef"
     assert app.config["TZ"] == "UTC"
     assert app.config["PORT"] == 9191

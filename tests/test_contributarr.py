@@ -526,8 +526,19 @@ def test_ghcr_workflow_is_repository_aware_and_gated():
     assert "password: ${{ secrets.GITHUB_TOKEN }}" in workflow
     assert "latest=false" in workflow
     assert "if: github.ref_type == 'tag'" in workflow
-    assert "type=raw,value=latest" in workflow
+    assert "type=raw,value=latest,enable=${{ needs.validate.outputs.stable_release == 'true' }}" in workflow
     assert "type=ref,event=tag" in workflow
     assert "Refuse to overwrite an existing release tag" in workflow
-    assert not re.search(r"type=raw,value=v\d{2}\.\d{2}\.\d{2}", workflow)
+    assert "Release tags must use SemVer" in workflow
+    assert "stable_release=false" in workflow and "stable_release=true" in workflow
+    assert not re.search(r"type=raw,value=v\d+\.\d+\.\d+", workflow)
     assert "workflow_dispatch" not in workflow
+
+
+def test_release_workflow_accepts_semver_and_rejects_malformed_tags():
+    workflow = open(".github/workflows/publish-ghcr.yml", encoding="utf-8").read()
+    pattern = re.search(r"semver_regex='([^']+)'", workflow).group(1)
+    valid = ("v1.0.0", "v1.1.0", "v1.1.1", "v2.0.0", "v1.0.0-beta.1", "v0.1.0-rc.1")
+    invalid = ("1.0.0", "v1", "v1.0", "v01.0.0", "v1.01.0", "v1.0.01", "v1.0.0-beta.01", "v1.0.0+")
+    assert all(re.fullmatch(pattern, tag) for tag in valid)
+    assert not any(re.fullmatch(pattern, tag) for tag in invalid)
