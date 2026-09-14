@@ -6,7 +6,7 @@ Contributarr is a self-hosted dashboard that permanently tracks storage used by 
 
 The first successful Plex sign-in becomes the administrator. Initially deploy Contributarr on your LAN, immediately sign in and claim it, and only then expose it through a trusted reverse proxy. Anyone who reaches an unclaimed installation first could become administrator.
 
-After the claim, other Plex users may sign in. They can access only their own statistics, request history, and remaining quota. The administrator can access the global dashboard, every user page, reconciliation controls, integration configuration, and identity mapping.
+After the claim, other Plex users may sign in. Everyone can access the community Home page and their own statistics, request history, and remaining quota. The administrator can access the global dashboard, every user page, reconciliation controls, integration configuration, identity mapping, and media-link destination setting.
 
 [![Latest GitHub release](https://img.shields.io/github/v/release/Git-Hub-Wasabii/Contributarr?display_name=tag)](https://github.com/Git-Hub-Wasabii/Contributarr/releases/latest)
 
@@ -88,7 +88,7 @@ Each request is isolated so one bad item does not stop the remainder. Movies che
 max(previous_charge, currently_observed_size)
 ```
 
-Deleting only a media file or replacing it with a smaller encode never lowers its charge. When a previously tracked request is removed from a successfully retrieved complete Seerr request list, Contributarr moves it to **Deleted requests**, records the previous charge as refunded, and returns those bytes to the user's quota. The original immutable usage ledger remains available for audit. Storage uses decimal GB (`1 GB = 1,000,000,000 bytes`). A Tautulli outage produces a warning and never blocks quotas or reconciliation.
+Deleting only a media file or replacing it with a smaller encode never lowers its charge. When a previously tracked request disappears from a successfully retrieved complete Seerr request list, Contributarr verifies the matching Radarr/Sonarr size before changing quota. It moves the item to **Deleted requests** and refunds the previous charge only when Servarr also reports 0 bytes. If media is still present—or the integration check fails—the charge is retained for safety and reconciliation tries again later. The original immutable usage ledger remains available for audit. Storage uses decimal GB (`1 GB = 1,000,000,000 bytes`). A Tautulli outage produces a warning and never blocks quotas or reconciliation.
 
 The Settings page saves all integration URLs and encrypted API keys in one submission. It also provides an application-wide display-currency selector; changing the code changes presentation only and does not convert saved contribution amounts.
 
