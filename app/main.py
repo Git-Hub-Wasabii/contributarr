@@ -1,7 +1,7 @@
 import json
 import math
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
 
 from flask import Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, session, url_for
@@ -14,7 +14,21 @@ from .reconcile import normalize, run_reconciliation
 bp = Blueprint("main", __name__)
 INTEGRATIONS = ("SEERR", "RADARR_1080", "RADARR_4K", "SONARR", "TAUTULLI")
 CURRENCIES = ("MYR", "USD", "SGD", "EUR", "GBP", "AUD", "CAD", "JPY", "CNY", "INR")
-LEDGER_PAGE_SIZES = (25, 50, 100, 250)
+PAGE_SIZES = (10, 25, 50, 100, 250)
+
+
+def page_values(page_name, per_page_name, default=10):
+    try:
+        per_page = int(request.args.get(per_page_name, default))
+    except (TypeError, ValueError):
+        per_page = default
+    if per_page not in PAGE_SIZES:
+        per_page = default
+    try:
+        page = max(1, int(request.args.get(page_name, 1)))
+    except (TypeError, ValueError):
+        page = 1
+    return page, per_page
 
 
 def bytes_gb(value):
@@ -74,38 +88,66 @@ def index():
 @login_required
 def home():
     db = get_db()
-    leaders = db.execute(
-        "SELECT u.*,"
-        "COALESCE((SELECT SUM(r.charged_bytes) FROM requests r WHERE r.user_id=u.id),0)+"
-        "COALESCE((SELECT SUM(a.bytes) FROM manual_adjustments a WHERE a.user_id=u.id),0) charged_bytes "
-        "FROM users u WHERE u.enabled=1 ORDER BY u.display_name COLLATE NOCASE"
-    ).fetchall()
+    seerr_base = media_link_base()
+    leaders = db.execute("SELECT * FROM users WHERE enabled=1 ORDER BY display_name COLLATE NOCASE").fetchall()
     contribution_leaders = sorted(leaders, key=lambda row: (-float(row["contribution_myr"]), row["display_name"].casefold()))
-    usage_leaders = sorted(leaders, key=lambda row: (-int(row["charged_bytes"]), row["display_name"].casefold()))
     recent_requests = db.execute(
         "SELECT r.*,u.display_name FROM requests r LEFT JOIN users u ON u.id=r.user_id "
         "WHERE r.is_deleted=0 AND (r.seerr_status IS NULL OR r.seerr_status!='removed_media_present') "
-        "ORDER BY COALESCE(r.requested_at,r.first_seen_at) DESC LIMIT 12"
+        "ORDER BY COALESCE(r.requested_at,r.first_seen_at) DESC LIMIT 9"
     ).fetchall()
-    top_plays, tautulli_warning = [], None
+    most_active_users, top_plays, tautulli_warning = [], [], None
     try:
         configured = integration_config("TAUTULLI")
         if configured["url"] and configured["api_key"]:
             history = TautulliClient(configured["url"], configured["api_key"]).history(length=250)
-            grouped = {}
+            mappings = db.execute(
+                "SELECT m.external_id,m.normalized_username,u.id user_id,u.display_name "
+                "FROM identity_mappings m JOIN users u ON u.id=m.user_id "
+                "WHERE m.provider='tautulli' AND u.enabled=1"
+            ).fetchall()
+            mapping_by_id = {row["external_id"]: row for row in mappings}
+            mapping_by_name = {row["normalized_username"]: row for row in mappings}
+            active, grouped = {}, {}
             for item in history:
+                external_id = str(item.get("user_id") or "")
+                username = item.get("user") or item.get("friendly_name") or "Unknown"
+                mapping = mapping_by_id.get(external_id) or mapping_by_name.get(normalize(username))
+                user_key = f"internal:{mapping['user_id']}" if mapping else f"tautulli:{external_id or normalize(username)}"
+                user_stats = active.setdefault(user_key, {
+                    "user_id": mapping["user_id"] if mapping else None,
+                    "display_name": mapping["display_name"] if mapping else username,
+                    "plays": 0, "duration": 0,
+                })
+                user_stats["plays"] += 1
+                user_stats["duration"] += int(item.get("duration") or 0)
                 title = item.get("full_title") or item.get("title") or "Unknown"
-                grouped[title] = grouped.get(title, 0) + 1
-            top_plays = sorted(grouped.items(), key=lambda item: (-item[1], item[0].casefold()))[:10]
+                media_key = normalize(title)
+                media_stats = grouped.setdefault(media_key, {"title": title, "plays": 0, "rating_key": item.get("rating_key")})
+                media_stats["plays"] += 1
+                media_stats["rating_key"] = media_stats["rating_key"] or item.get("rating_key")
+            most_active_users = sorted(active.values(), key=lambda item: (-item["plays"], -item["duration"], item["display_name"].casefold()))[:5]
+            request_links = {}
+            if seerr_base:
+                for media in db.execute(
+                    "SELECT title,media_type,tmdb_id FROM requests WHERE is_deleted=0 "
+                    "AND (seerr_status IS NULL OR seerr_status!='removed_media_present') AND tmdb_id IS NOT NULL ORDER BY id"
+                ):
+                    request_links.setdefault(normalize(media["title"]), f"{seerr_base}/{media['media_type']}/{media['tmdb_id']}")
+            top_plays = sorted(grouped.values(), key=lambda item: (-item["plays"], item["title"].casefold()))[:5]
+            for media in top_plays:
+                media["url"] = request_links.get(normalize(media["title"]))
+                if not media["url"] and media["rating_key"] is not None:
+                    media["url"] = f"{configured['url'].rstrip('/')}/info?rating_key={quote(str(media['rating_key']), safe='')}"
         else:
             tautulli_warning = "Tautulli is not configured."
     except IntegrationError as exc:
         tautulli_warning = str(exc)
     return render_template(
-        "home.html", contribution_leaders=contribution_leaders[:10],
-        usage_leaders=usage_leaders[:10], recent_requests=recent_requests,
+        "home.html", contribution_leaders=contribution_leaders[:5],
+        most_active_users=most_active_users, recent_requests=recent_requests,
         top_plays=top_plays, tautulli_warning=tautulli_warning,
-        currency=currency_code(), seerr_url=media_link_base(),
+        currency=currency_code(), seerr_url=seerr_base,
     )
 
 
@@ -114,16 +156,7 @@ def home():
 @owner_required
 def dashboard():
     db = get_db()
-    try:
-        ledger_per_page = int(request.args.get("ledger_per_page", 25))
-    except (TypeError, ValueError):
-        ledger_per_page = 25
-    if ledger_per_page not in LEDGER_PAGE_SIZES:
-        ledger_per_page = 25
-    try:
-        ledger_page = max(1, int(request.args.get("ledger_page", 1)))
-    except (TypeError, ValueError):
-        ledger_page = 1
+    ledger_page, ledger_per_page = page_values("ledger_page", "ledger_per_page")
     totals = db.execute("SELECT COUNT(*) users,COALESCE(SUM(quota_bytes),0) quota FROM users WHERE enabled=1").fetchone()
     charged = db.execute("SELECT COALESCE(SUM(charged_bytes),0) n FROM requests r JOIN users u ON u.id=r.user_id WHERE u.enabled=1").fetchone()["n"]
     adjustments = db.execute("SELECT COALESCE(SUM(bytes),0) n FROM manual_adjustments a JOIN users u ON u.id=a.user_id WHERE u.enabled=1").fetchone()["n"]
@@ -161,7 +194,7 @@ def dashboard():
         request_groups=request_buckets(requests_rows), ledger=ledger, last_sync=last_sync,
         activity=activity, tautulli_error=tautulli_error, seerr_url=seerr_url,
         ledger_page=ledger_page, ledger_pages=ledger_pages,
-        ledger_per_page=ledger_per_page, ledger_page_sizes=LEDGER_PAGE_SIZES,
+        ledger_per_page=ledger_per_page, ledger_page_sizes=PAGE_SIZES,
         ledger_total=ledger_total,
     )
 
@@ -217,6 +250,27 @@ def users_admin():
             db.execute("UPDATE users SET contribution_myr=?,quota_bytes=?,enabled=?,updated_at=? WHERE id=?", (float(request.form.get("contribution", 0)), int(float(request.form.get("quota_gb", 0)) * 1_000_000_000), int(request.form.get("enabled") == "on"), utcnow(), user_id))
         elif action == "adjustment":
             db.execute("INSERT INTO manual_adjustments(user_id,bytes,note,created_at) VALUES(?,?,?,?)", (int(request.form["user_id"]), int(float(request.form["gb"]) * 1_000_000_000), request.form["note"].strip(), utcnow()))
+        elif action == "undo_adjustment":
+            try:
+                adjustment_id = int(request.form["adjustment_id"])
+            except (KeyError, TypeError, ValueError):
+                abort(400)
+            with transaction(db, immediate=True):
+                original = db.execute(
+                    "SELECT * FROM manual_adjustments WHERE id=? AND reversed_at IS NULL AND reversal_of_adjustment_id IS NULL",
+                    (adjustment_id,),
+                ).fetchone()
+                if not original:
+                    abort(409)
+                now = utcnow()
+                reversal_id = db.execute(
+                    "INSERT INTO manual_adjustments(user_id,bytes,note,created_at,reversal_of_adjustment_id) VALUES(?,?,?,?,?)",
+                    (original["user_id"], -original["bytes"], f"Undo adjustment #{original['id']}: {original['note']}", now, original["id"]),
+                ).lastrowid
+                db.execute(
+                    "UPDATE manual_adjustments SET reversed_at=?,reversed_by_adjustment_id=? WHERE id=?",
+                    (now, reversal_id, original["id"]),
+                )
         elif action == "mapping":
             user_id, provider = int(request.form["user_id"]), request.form["provider"]
             if provider not in {"seerr", "plex", "tautulli"}:
@@ -229,13 +283,30 @@ def users_admin():
             abort(400)
         flash("User settings saved.", "success")
         return redirect(url_for("main.users_admin"))
-    users = db.execute("SELECT u.*,COALESCE(SUM(r.charged_bytes),0) charged_bytes FROM users u LEFT JOIN requests r ON r.user_id=u.id GROUP BY u.id ORDER BY u.display_name COLLATE NOCASE").fetchall()
+    users_page, users_per_page = page_values("users_page", "users_per_page")
+    users_total = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    users_pages = max(1, math.ceil(users_total / users_per_page))
+    users_page = min(users_page, users_pages)
+    user_query = "SELECT u.*,COALESCE(SUM(r.charged_bytes),0) charged_bytes FROM users u LEFT JOIN requests r ON r.user_id=u.id GROUP BY u.id ORDER BY u.display_name COLLATE NOCASE"
+    all_users = db.execute(user_query).fetchall()
+    users = db.execute(user_query + " LIMIT ? OFFSET ?", (users_per_page, (users_page - 1) * users_per_page)).fetchall()
     identities = db.execute("SELECT * FROM identity_mappings ORDER BY provider,username").fetchall()
+    adjustment_page, adjustment_per_page = page_values("adjustment_page", "adjustment_per_page")
+    adjustment_total = db.execute("SELECT COUNT(*) FROM manual_adjustments").fetchone()[0]
+    adjustment_pages = max(1, math.ceil(adjustment_total / adjustment_per_page))
+    adjustment_page = min(adjustment_page, adjustment_pages)
     adjustment_history = db.execute(
         "SELECT a.*,u.display_name FROM manual_adjustments a JOIN users u ON u.id=a.user_id "
-        "ORDER BY a.created_at DESC,a.id DESC"
+        "ORDER BY a.created_at DESC,a.id DESC LIMIT ? OFFSET ?",
+        (adjustment_per_page, (adjustment_page - 1) * adjustment_per_page),
     ).fetchall()
-    return render_template("users.html", users=users, identities=identities, adjustment_history=adjustment_history, currency=currency_code())
+    return render_template(
+        "users.html", users=users, all_users=all_users, identities=identities,
+        adjustment_history=adjustment_history, currency=currency_code(), page_sizes=PAGE_SIZES,
+        users_page=users_page, users_pages=users_pages, users_per_page=users_per_page, users_total=users_total,
+        adjustment_page=adjustment_page, adjustment_pages=adjustment_pages,
+        adjustment_per_page=adjustment_per_page, adjustment_total=adjustment_total,
+    )
 
 
 @bp.route("/admin/settings", methods=["GET", "POST"])

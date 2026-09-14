@@ -81,17 +81,98 @@ def normalized_utc_timestamp(value, fallback):
 
 
 def observed_charge(req, c):
-    if req["media_type"] == "movie":
-        size_1080 = c["radarr_1080"].size_for_tmdb(req["tmdb_id"])
-        size_4k = c["radarr_4k"].size_for_tmdb(req["tmdb_id"])
-        if size_1080: return size_1080, "Radarr 1080p"
-        return size_4k, "Radarr 4K" if size_4k else None
-    if req["media_type"] == "tv" and req["tvdb_id"]:
-        return c["sonarr"].size_for_seasons(req["tvdb_id"], req["seasons"]), "Sonarr"
-    return 0, None
+    assets = observed_assets(req, c)
+    return asset_total(assets), source_summary(assets)
 
 
-def reconcile_one(item, c):
+def observed_assets(req, c):
+    """Return stable logical assets with exact observed bytes and optional physical identity."""
+    if req["media_type"] == "movie" and req.get("tmdb_id"):
+        assets = []
+        for client_key, source in (("radarr_1080", "Radarr 1080p"), ("radarr_4k", "Radarr 4K")):
+            client = c[client_key]
+            if hasattr(client, "observation_for_tmdb"):
+                observation = client.observation_for_tmdb(req["tmdb_id"])
+            else:
+                observation = {"bytes": client.size_for_tmdb(req["tmdb_id"]), "physical_id": None}
+            assets.append({
+                "key": f"movie:tmdb:{int(req['tmdb_id'])}:{client_key}",
+                "bytes": int(observation.get("bytes") or 0),
+                "source": source,
+                "physical_id": observation.get("physical_id"),
+            })
+        return assets
+    if req["media_type"] == "tv" and req.get("tvdb_id"):
+        client = c["sonarr"]
+        if hasattr(client, "season_observations"):
+            observations = client.season_observations(req["tvdb_id"], req["seasons"])
+            if observations:
+                return [{
+                    "key": f"tv:tvdb:{int(req['tvdb_id'])}:season:{int(item['season'])}",
+                    "bytes": int(item.get("bytes") or 0),
+                    "source": f"Sonarr season {int(item['season'])}",
+                    "physical_id": None,
+                } for item in observations]
+        size = int(client.size_for_seasons(req["tvdb_id"], req["seasons"]) or 0)
+        season_key = ",".join(str(int(value)) for value in sorted(set(req["seasons"]))) or "all"
+        return [{
+            "key": f"tv:tvdb:{int(req['tvdb_id'])}:seasons:{season_key}",
+            "bytes": size, "source": f"Sonarr seasons {season_key}", "physical_id": None,
+        }]
+    return []
+
+
+def asset_total(assets):
+    """Sum logical assets, collapsing assets that identify the same physical file."""
+    groups = {}
+    for asset in assets:
+        group = asset.get("physical_id") or asset["key"]
+        groups[group] = max(groups.get(group, 0), int(asset.get("bytes") or 0))
+    return sum(groups.values())
+
+
+def source_summary(assets):
+    sources = list(dict.fromkeys(asset["source"] for asset in assets if int(asset.get("bytes") or 0) > 0))
+    seasons = [source.removeprefix("Sonarr season ") for source in sources if source.startswith("Sonarr season ")]
+    if sources and len(seasons) == len(sources):
+        return "Sonarr seasons " + ", ".join(seasons)
+    return " + ".join(sources) or None
+
+
+def decode_asset_map(value):
+    try:
+        data = json.loads(value or "{}")
+        return data if isinstance(data, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def mapped_assets(asset_map):
+    return [{"key": key, **value} for key, value in asset_map.items()]
+
+
+def highwater_map():
+    result = {}
+    for row in get_db().execute("SELECT accounting_assets FROM requests WHERE is_deleted=0"):
+        for key, asset in decode_asset_map(row["accounting_assets"]).items():
+            if int(asset.get("bytes") or 0) > int(result.get(key, {}).get("bytes") or 0):
+                result[key] = dict(asset)
+    return result
+
+
+def reserved_asset_claims():
+    claims = {}
+    rows = get_db().execute(
+        "SELECT seerr_request_id,accounting_assets FROM requests "
+        "WHERE is_deleted=0 AND seerr_status='removed_media_present' ORDER BY COALESCE(requested_at,first_seen_at),id"
+    ).fetchall()
+    for row in rows:
+        for key in decode_asset_map(row["accounting_assets"]):
+            claims.setdefault(key, row["seerr_request_id"])
+    return claims
+
+
+def reconcile_one(item, c, claimed_assets=None, global_highwaters=None):
     req = extract_request(item)
     needs_details = not req["title"] or (req["media_type"] == "tv" and not req["tvdb_id"])
     if needs_details and req["tmdb_id"] and req["media_type"] in {"movie", "tv"}:
@@ -103,17 +184,49 @@ def reconcile_one(item, c):
     db = get_db()
     user_id = import_seerr_user(req["seerr_user_id"], req["username"])
     existing = db.execute("SELECT * FROM requests WHERE seerr_request_id=?", (req["id"],)).fetchone()
-    observed, source = observed_charge(req, c)
+    observations = observed_assets(req, c)
+    observed = asset_total(observations)
     previous = int(existing["charged_bytes"]) if existing else 0
-    charged = max(previous, observed)
+    previous_assets = decode_asset_map(existing["accounting_assets"]) if existing else {}
+    claimed_assets = claimed_assets if claimed_assets is not None else {}
+    global_highwaters = global_highwaters if global_highwaters is not None else {}
+    assigned, duplicate_owners = {}, set()
+    for observation in observations:
+        key = observation["key"]
+        owner = claimed_assets.get(key)
+        if owner is not None and owner != req["id"]:
+            duplicate_owners.add(owner)
+            continue
+        claimed_assets[key] = req["id"]
+        prior = previous_assets.get(key, {})
+        transferable = global_highwaters.get(key, {}) if observation["bytes"] > 0 else {}
+        highwater = max(int(observation["bytes"]), int(prior.get("bytes") or 0), int(transferable.get("bytes") or 0))
+        assigned[key] = {
+            "bytes": highwater, "source": observation["source"],
+            "physical_id": observation.get("physical_id") or prior.get("physical_id") or transferable.get("physical_id"),
+        }
+    charged = asset_total(mapped_assets(assigned))
+    if existing and not previous_assets and previous > charged and assigned:
+        first_key = next(iter(assigned))
+        assigned[first_key]["bytes"] += previous - charged
+        charged = asset_total(mapped_assets(assigned))
+    assigned_current = [{**asset, "bytes": next((item["bytes"] for item in observations if item["key"] == key), 0), "key": key} for key, asset in assigned.items()]
+    deduplicated = max(0, observed - asset_total(assigned_current))
+    source = source_summary(mapped_assets(assigned))
+    if duplicate_owners:
+        duplicate_note = "Duplicate of Seerr request " + ", ".join(f"#{value}" for value in sorted(duplicate_owners))
+        source = f"{source}; {duplicate_note}" if source else duplicate_note
+    for key, asset in assigned.items():
+        if int(asset["bytes"]) > int(global_highwaters.get(key, {}).get("bytes") or 0):
+            global_highwaters[key] = dict(asset)
     now = utcnow()
     requested_at = normalized_utc_timestamp(req["requested_at"], existing["requested_at"] if existing and existing["requested_at"] else existing["first_seen_at"] if existing else now)
-    values = (user_id, req["seerr_user_id"], req["username"], req["title"], req["media_type"], req["tmdb_id"], req["tvdb_id"], json.dumps(req["seasons"]), source or (existing["servarr_source"] if existing else None), charged, now, req["status"], json.dumps(req["raw"], separators=(",", ":")), requested_at)
+    values = (user_id, req["seerr_user_id"], req["username"], req["title"], req["media_type"], req["tmdb_id"], req["tvdb_id"], json.dumps(req["seasons"]), source or (existing["servarr_source"] if existing else None), charged, now, req["status"], json.dumps(req["raw"], separators=(",", ":")), requested_at, json.dumps(assigned, separators=(",", ":")), observed, deduplicated)
     if existing:
-        db.execute("UPDATE requests SET user_id=?,seerr_user_id=?,display_username=?,title=?,media_type=?,tmdb_id=?,tvdb_id=?,requested_seasons=?,servarr_source=?,charged_bytes=?,last_updated_at=?,seerr_status=?,raw_metadata=?,requested_at=?,is_deleted=0,deleted_at=NULL,refunded_bytes=0 WHERE seerr_request_id=?", values + (req["id"],))
+        db.execute("UPDATE requests SET user_id=?,seerr_user_id=?,display_username=?,title=?,media_type=?,tmdb_id=?,tvdb_id=?,requested_seasons=?,servarr_source=?,charged_bytes=?,last_updated_at=?,seerr_status=?,raw_metadata=?,requested_at=?,accounting_assets=?,observed_bytes=?,deduplicated_bytes=?,is_deleted=0,deleted_at=NULL,refunded_bytes=0 WHERE seerr_request_id=?", values + (req["id"],))
         request_id = existing["id"]
     else:
-        cur = db.execute("INSERT INTO requests(user_id,seerr_user_id,display_username,title,media_type,tmdb_id,tvdb_id,requested_seasons,servarr_source,charged_bytes,last_updated_at,seerr_status,raw_metadata,requested_at,seerr_request_id,first_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values + (req["id"], now))
+        cur = db.execute("INSERT INTO requests(user_id,seerr_user_id,display_username,title,media_type,tmdb_id,tvdb_id,requested_seasons,servarr_source,charged_bytes,last_updated_at,seerr_status,raw_metadata,requested_at,accounting_assets,observed_bytes,deduplicated_bytes,seerr_request_id,first_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values + (req["id"], now))
         request_id = cur.lastrowid
     if charged > previous:
         db.execute("INSERT INTO usage_ledger(request_id,user_id,delta_bytes,total_charged_bytes,source,created_at) VALUES(?,?,?,?,?,?)", (request_id, user_id, charged - previous, charged, source, now))
@@ -129,6 +242,8 @@ def mark_deleted_requests(seen_request_ids, integration_clients):
     for row in rows:
         if row["seerr_request_id"] in seen:
             continue
+        if row["is_deleted"]:
+            continue
         if (row["media_type"] == "movie" and not row["tmdb_id"]) or (row["media_type"] == "tv" and not row["tvdb_id"]):
             warnings.append(f"Could not verify deleted request {row['seerr_request_id']}: stable media ID is missing.")
             continue
@@ -137,26 +252,38 @@ def mark_deleted_requests(seen_request_ids, integration_clients):
             "tvdb_id": row["tvdb_id"], "seasons": json.loads(row["requested_seasons"] or "[]"),
         }
         try:
-            observed, source = observed_charge(request_data, integration_clients)
+            observations = observed_assets(request_data, integration_clients)
+            observed, source = asset_total(observations), source_summary(observations)
         except Exception as exc:
             warnings.append(f"Could not verify deleted request {row['seerr_request_id']}: {exc}")
             continue
-        historical = max(int(row["charged_bytes"] or 0), int(row["refunded_bytes"] or 0))
+        historical = int(row["charged_bytes"] or 0)
         if observed > 0:
-            restored_charge = max(historical, observed)
-            if row["is_deleted"] or restored_charge != row["charged_bytes"] or row["seerr_status"] != "removed_media_present":
+            asset_map = decode_asset_map(row["accounting_assets"])
+            if asset_map:
+                current = {item["key"]: item for item in observations}
+                for key, asset in asset_map.items():
+                    if key in current:
+                        asset["bytes"] = max(int(asset.get("bytes") or 0), int(current[key]["bytes"]))
+                        asset["physical_id"] = current[key].get("physical_id") or asset.get("physical_id")
+            elif not int(row["deduplicated_bytes"] or 0):
+                asset_map = {item["key"]: {"bytes": item["bytes"], "source": item["source"], "physical_id": item.get("physical_id")} for item in observations}
+            retained = asset_total(mapped_assets(asset_map))
+            if asset_map and historical > retained:
+                first_key = next(iter(asset_map))
+                asset_map[first_key]["bytes"] += historical - retained
+                retained = asset_total(mapped_assets(asset_map))
+            charged = max(historical, retained)
+            db.execute(
+                "UPDATE requests SET last_updated_at=?,servarr_source=COALESCE(?,servarr_source),seerr_status='removed_media_present',observed_bytes=?,charged_bytes=?,accounting_assets=? WHERE id=?",
+                (now, source, observed, charged, json.dumps(asset_map, separators=(",", ":")), row["id"]),
+            )
+            if charged > historical:
                 db.execute(
-                    "UPDATE requests SET charged_bytes=?,refunded_bytes=0,is_deleted=0,deleted_at=NULL,last_updated_at=?,servarr_source=COALESCE(?,servarr_source),seerr_status='removed_media_present' WHERE id=?",
-                    (restored_charge, now, source, row["id"]),
+                    "INSERT INTO usage_ledger(request_id,user_id,delta_bytes,total_charged_bytes,source,created_at) VALUES(?,?,?,?,?,?)",
+                    (row["id"], row["user_id"], charged - historical, charged, source, now),
                 )
-                if restored_charge > historical:
-                    db.execute(
-                        "INSERT INTO usage_ledger(request_id,user_id,delta_bytes,total_charged_bytes,source,created_at) VALUES(?,?,?,?,?,?)",
-                        (row["id"], row["user_id"], restored_charge - historical, restored_charge, source, now),
-                    )
-                if row["is_deleted"]:
-                    restored += 1
-        elif not row["is_deleted"]:
+        else:
             db.execute(
                 "UPDATE requests SET refunded_bytes=charged_bytes,charged_bytes=0,is_deleted=1,deleted_at=?,last_updated_at=?,seerr_status='deleted' WHERE id=?",
                 (now, now, row["id"]),
@@ -192,15 +319,21 @@ def run_reconciliation(trigger="manual"):
             except Exception as exc:
                 messages.append(f"Tautulli warning: {exc}")
         request_items = c["seerr"].requests()
-        for item in request_items:
+        with transaction(db):
+            deletion_result = mark_deleted_requests((item["id"] for item in request_items), c)
+        claimed_assets = reserved_asset_claims()
+        global_highwaters = highwater_map()
+        ordered_items = sorted(
+            request_items,
+            key=lambda item: (str(item.get("createdAt") or item.get("created_at") or item.get("createdDate") or ""), int(item["id"])),
+        )
+        for item in ordered_items:
             try:
-                with transaction(db): reconcile_one(item, c)
+                with transaction(db): reconcile_one(item, c, claimed_assets, global_highwaters)
                 processed += 1
             except Exception as exc:
                 errors += 1
                 messages.append(f"Request {item.get('id', '?')}: {exc}")
-        with transaction(db):
-            deletion_result = mark_deleted_requests((item["id"] for item in request_items), c)
         if deletion_result["deleted"]:
             messages.append(f"Refunded {deletion_result['deleted']} deleted Seerr request(s) with no remaining Servarr storage.")
         if deletion_result["restored"]:

@@ -1,4 +1,5 @@
 import requests
+import posixpath
 
 
 class IntegrationError(RuntimeError):
@@ -56,11 +57,22 @@ class SeerrClient(BaseClient):
 class RadarrClient(BaseClient):
     def movies(self): return self.get("/api/v3/movie")
 
-    def size_for_tmdb(self, tmdb_id):
+    def observation_for_tmdb(self, tmdb_id):
         for movie in self.movies():
-            if int(movie.get("tmdbId") or 0) == int(tmdb_id or 0):
-                return int((movie.get("movieFile") or {}).get("size") or movie.get("sizeOnDisk") or 0)
-        return 0
+            if int(movie.get("tmdbId") or 0) != int(tmdb_id or 0):
+                continue
+            media_file = movie.get("movieFile") or {}
+            size = int(media_file.get("size") or movie.get("sizeOnDisk") or 0)
+            path = media_file.get("path")
+            if not path and movie.get("path") and media_file.get("relativePath"):
+                path = posixpath.join(str(movie["path"]).replace("\\", "/"), str(media_file["relativePath"]).replace("\\", "/"))
+            normalized_path = posixpath.normpath(str(path).replace(chr(92), "/")).casefold() if path else None
+            physical_id = f"path:{normalized_path}" if normalized_path else None
+            return {"bytes": size, "physical_id": physical_id, "file_id": media_file.get("id")}
+        return {"bytes": 0, "physical_id": None, "file_id": None}
+
+    def size_for_tmdb(self, tmdb_id):
+        return self.observation_for_tmdb(tmdb_id)["bytes"]
 
 
 class SonarrClient(BaseClient):
@@ -69,15 +81,21 @@ class SonarrClient(BaseClient):
     def series_for(self, tvdb_id):
         return next((s for s in self.series() if int(s.get("tvdbId") or 0) == int(tvdb_id or 0)), None)
 
-    def size_for_seasons(self, tvdb_id, seasons):
+    def season_observations(self, tvdb_id, seasons):
         series = self.series_for(tvdb_id)
         if not series:
-            return 0
+            return []
         wanted = {int(n) for n in seasons}
         stats = series.get("statistics", {}).get("seasonStatistics") or []
         if not stats:
             stats = [{"seasonNumber": s.get("seasonNumber"), "sizeOnDisk": (s.get("statistics") or {}).get("sizeOnDisk", 0)} for s in series.get("seasons", [])]
-        return sum(int(s.get("sizeOnDisk") or 0) for s in stats if not wanted or int(s.get("seasonNumber") or 0) in wanted)
+        return [
+            {"season": int(s.get("seasonNumber") or 0), "bytes": int(s.get("sizeOnDisk") or 0)}
+            for s in stats if not wanted or int(s.get("seasonNumber") or 0) in wanted
+        ]
+
+    def size_for_seasons(self, tvdb_id, seasons):
+        return sum(item["bytes"] for item in self.season_observations(tvdb_id, seasons))
 
 
 class TautulliClient(BaseClient):
