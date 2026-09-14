@@ -58,8 +58,6 @@ jobs:
           trap cleanup EXIT
           docker run --detach --name contributarr-smoke \
             --publish 127.0.0.1:9096:9096 \
-            --env SESSION_SECRET=ci-session-secret-0123456789abcdef \
-            --env WEBHOOK_SECRET=ci-webhook-secret-0123456789abcdef \
             contributarr:ci
           for attempt in {1..30}; do
             if curl --fail --silent --show-error http://127.0.0.1:9096/health; then
