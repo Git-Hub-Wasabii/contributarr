@@ -30,7 +30,7 @@
     {% for category,message in get_flashed_messages(with_categories=true) %}<div class="notice {{ category }}">{{ message }}</div>{% endfor %}
     {% block content %}{% endblock %}
   </main>
-  <footer>Contributarr {{ config.APP_VERSION }}</footer>
+  <footer>Contributarr {{ config.APP_VERSION }}{% if config.BUILD_COMMIT and config.BUILD_COMMIT != 'unknown' %} · {{ config.BUILD_COMMIT[:7] }}{% endif %}</footer>
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </body>
 </html>
