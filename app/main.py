@@ -123,9 +123,8 @@ def home():
                 user_stats["duration"] += int(item.get("duration") or 0)
                 title = item.get("full_title") or item.get("title") or "Unknown"
                 media_key = normalize(title)
-                media_stats = grouped.setdefault(media_key, {"title": title, "plays": 0, "rating_key": item.get("rating_key")})
+                media_stats = grouped.setdefault(media_key, {"title": title, "plays": 0})
                 media_stats["plays"] += 1
-                media_stats["rating_key"] = media_stats["rating_key"] or item.get("rating_key")
             most_active_users = sorted(active.values(), key=lambda item: (-item["plays"], -item["duration"], item["display_name"].casefold()))[:5]
             request_links = {}
             if seerr_base:
@@ -137,8 +136,8 @@ def home():
             top_plays = sorted(grouped.values(), key=lambda item: (-item["plays"], item["title"].casefold()))[:5]
             for media in top_plays:
                 media["url"] = request_links.get(normalize(media["title"]))
-                if not media["url"] and media["rating_key"] is not None:
-                    media["url"] = f"{configured['url'].rstrip('/')}/info?rating_key={quote(str(media['rating_key']), safe='')}"
+                if not media["url"] and seerr_base:
+                    media["url"] = f"{seerr_base}/search?query={quote(media['title'], safe='')}"
         else:
             tautulli_warning = "Tautulli is not configured."
     except IntegrationError as exc:
