@@ -130,8 +130,10 @@ th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spa
 .pagination { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 16px; }
 .pagination-links { display: flex; gap: 8px; }
 .leaderboard-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.leaderboard-panel { display: flex; min-width: 0; flex-direction: column; margin: 0; }
+.leaderboard-header { height: 84px; flex: 0 0 84px; }
 .leaderboard { min-width: 0; margin: 0; padding: 0; list-style: none; }
-.leaderboard li { display: grid; grid-template-columns: 2rem minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.leaderboard li { display: grid; grid-template-columns: 2rem minmax(0, 1fr) auto; align-items: center; min-height: 48px; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .leaderboard .rank { color: var(--muted); font-variant-numeric: tabular-nums; }
 .leaderboard li:last-child { border-bottom: 0; }
 .leaderboard li > a, .leaderboard li > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -139,6 +141,7 @@ th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spa
 .recent-media-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 18px; }
 .recent-media { min-width: 0; padding: 11px 4px; border-bottom: 1px solid var(--line); }
 .recent-media p, .recent-media time { display: block; margin: 4px 0 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.adjustment-history-heading { margin-top: 28px; }
 
 .auth-card { max-width: 480px; text-align: center; margin: 10vh auto; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 42px; box-shadow: var(--shadow); }
 .auth-card .logo { display: grid; place-items: center; margin: auto; width: 56px; height: 56px; border-radius: 14px; background: var(--accent); color: var(--accent-text); font-size: 29px; font-weight: 900; }
@@ -190,6 +193,7 @@ input, select { display: block; width: 100%; background: var(--panel-soft); colo
   .sync-meta { white-space: normal; }
   .leaderboard-grid, .recent-media-grid { grid-template-columns: 1fr; }
   .leaderboard-grid > :last-child { grid-column: span 1; }
+  .leaderboard-header { height: auto; flex-basis: auto; }
   .split { grid-template-columns: 1fr; }
   .table-wrap { overflow: visible; }
   table, thead, tbody, tr, th, td { display: block; }
